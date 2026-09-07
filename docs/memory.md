@@ -10,6 +10,8 @@ Use short, explicit records with provenance. The model proposes additions; the a
 
 ## Logical schema
 
+Internal memory and user-facing notes are separate records in the same encrypted vault. The user notebook contains source-linked takeaways and agreed next steps, with editing and deletion controls. It is not a dump of the graph. One structured follow-up call proposes both patches; see [turn processing](turn-processing.md).
+
 All personal fields, search indexes, and embeddings live in the encrypted vault. Random identifiers are scoped to the profile. Timestamps distinguish when something happened from when Openmind learned it.
 
 | Table | Main fields and constraints |
@@ -22,8 +24,10 @@ All personal fields, search indexes, and embeddings live in the encrypted vault.
 | `memory_edges` | ID, source/target node IDs, relationship type, evidence status, validity dates; endpoints must share profile |
 | `evidence` | Memory record ID, source message ID and revision, optional character span, extraction job ID; source must exist |
 | `session_summaries` | Session ID, summary, source revision set, model/policy versions; invalidatable derived data |
+| `user_notes` | ID, profile/session ID, kind, text, proposed/agreed state, generated/user/edited authorship, revision, source coverage; user edits protected from automatic overwrite |
+| `user_note_evidence` | Note ID/revision, visible source message ID/revision, evidence role; distinguish user disclosure, accepted agreement, and assistant proposal |
 | `embeddings` | Memory ID/revision, embedding model fingerprint, dimensions, vector; delete or rebuild on source changes |
-| `memory_jobs` | Job ID, source message range/revisions, graph revision, provider consent/config version, model/schema version, status, retry count |
+| `memory_jobs` | Job ID, contiguous source range/revisions, graph/notebook revisions, privacy epoch, provider consent/config version, model/schema version, status, retry count; covers both note sets |
 | `memory_changes` | Operation ID, affected record IDs, reason code, revision, originating job; avoid duplicate sensitive text |
 | `forget_rules` | ID, minimal user-approved topic/person selector, scope, timestamp; explain that a minimal exclusion is retained |
 | `planned_sessions` | ID, recurrence, timezone, DST behavior, next occurrence, reminder preference |
@@ -60,10 +64,10 @@ The tentative edge is an interpretation. On a later visit, the assistant might a
 4. Validate JSON shape, allowed types, source existence, matching message revisions, profile ownership, length limits, and graph revision. Reject unsupported IDs and dangling edges.
 5. Require evidence for every accepted record. Quoted spans can be checked mechanically. Whether a paraphrase follows from evidence still needs model evaluation and sampled human review; schema validity does not prove truth.
 6. Resolve duplicates conservatively. Match stable IDs or user-confirmed aliases. Similar names do not justify merging two people. Keep conflicting reports with dates and provenance.
-7. Apply an accepted patch in one transaction, with an idempotency key from source revisions, extractor version, and model fingerprint. A conflict requires re-evaluation against current sources, not overwriting newer records.
+7. Validate the paired user-notebook patch, including source support and user-edit revisions. Apply both accepted patches in one transaction, with an idempotency key from source revisions, extractor version, and model fingerprint. Either patch failing rejects the combined commit. A conflict requires re-evaluation against current sources, not overwriting newer records.
 8. Update the encrypted search index. Embedding work is optional and uses the same revision checks. Emit only a coarse user-facing status, not the raw patch.
 
-A bounded retry may repair formatting errors. Repeated failures disable extraction for that model until retested, while preserving normal chat where supported. A model's request for more access never changes its permissions.
+A bounded retry may repair formatting errors. Repeated failures mark both note updates unavailable for that configuration until retested; the UI must not imply they succeeded. Chat-only operation may remain available in development, but does not meet the clinical three-result workflow. A model's request for more access never changes its permissions. Evaluate every submitted turn for updates, allowing empty patches and respecting memory-off preferences.
 
 No speculative overnight "analysis" pass. Consolidation may shorten redundant supported facts when the app is unlocked and idle. It must retain provenance and not invent a stronger conclusion.
 
@@ -85,11 +89,11 @@ Users can view concise remembered facts, correct an assumption, forget a person 
 
 For a correction, preserve dated conflicting evidence only where needed for meaning, mark the older interpretation superseded, and invalidate derived summaries and embeddings. When the user says "that was a coworker, not my brother," the application must repair relationships as well as labels.
 
-For forgetting, calculate the dependency set from evidence before committing the deletion. Remove affected nodes, edges, summaries, search entries, embeddings, pending jobs, and duplicated content in change records. Derived records with mixed sources must be dropped and rebuilt from permitted sources before reuse. Cancel active work and reject late outputs whose source or graph revision is stale.
+For forgetting, calculate the dependency set from evidence before committing the deletion. Remove affected nodes, edges, summaries, generated notebook entries, search entries, embeddings, pending jobs, and duplicated content in change records. Show affected user-written or edited notes and include them in the user's selected deletion scope; do not silently overwrite them. Derived records with mixed sources must be dropped and rebuilt from permitted sources before reuse. Cancel active work and reject late outputs whose source revision, graph/notebook revision, or privacy epoch is stale. Topic exclusions also cover retained notebook text so it cannot reintroduce a forgotten fact.
 
 Forgetting a topic has two distinct choices. "Remove this from memory" can retain the transcript but must exclude affected source spans or messages from future retrieval and extraction. "Delete this history too" removes the affected source content. The UI explains the difference before applying the operation. A minimal forget rule may be needed to prevent relearning from retained history; the user can inspect and remove that rule.
 
-A session with memory disabled contributes no persistent graph records. A private session also avoids durable transcript storage and uses only explicitly permitted existing context. Private mode cannot control provider logs, system crash dumps, or screenshots; its wording must be precise.
+A session with memory disabled contributes no persistent graph records. User-notebook saving is a separate visible preference. A private session avoids durable transcript and generated-notebook storage and uses only explicitly permitted existing context; its work queue is transient. Private mode cannot control provider logs, system crash dumps, or screenshots; its wording must be precise.
 
 Deletion applies to the active vault. Old backups and remote provider copies need separate treatment; see [privacy](privacy.md). Do not promise secure physical overwrite on an SSD. Rebuilding a live database can remove obsolete accessible records without proving deletion from every disk snapshot.
 
@@ -102,6 +106,8 @@ These are proposed acceptance gates, not measured results.
 - At least 98% of accepted factual records supported by cited sources in a held-out set of 200 human-reviewed candidates. Report the sample and uncertainty, not just the percentage.
 - At least 90% retrieval recall on 100 annotated continuity questions within the chosen context budget, with no more than 10% irrelevant selected records by human judgment.
 - Every inference is labeled internally, every correction survives restart, and invalid extraction output leaves the previous graph unchanged.
+- Every generated user note cites visible source evidence; suggestions are not recorded as commitments without agreement, and a concurrent user edit survives generation.
+- An invalid patch in either branch leaves both note sets unchanged; retries and coalesced jobs cover each submitted source turn exactly once per revision.
 - Include ambiguous names, changes over time, sarcasm, hypothetical stories, quotes about other people, malicious instructions inside memories, and indirect references.
 
 Failure on factual support should reduce what is written or disable extraction for that model. It should not be addressed by making the graph more elaborate.

@@ -115,7 +115,7 @@ components:
 
 Proposed direction, pending visual review with Krish. The interface should give a personal conversation room to breathe. Use a broad writing area, visible dates, quiet navigation, and a single clear action. The visual character comes from proportion, typography, and a small session marker that recalls the margin of a notebook.
 
-The app is honest about being AI. Avoid a human therapist avatar, a medical-office identity, relationship status, or an animated face. The interface should not imply a clinician is watching or that a model has feelings.
+The intended product is clinical therapy, with the treatment model and evidence still to be defined. The app is honest about being AI. Avoid a human therapist avatar, relationship status, or an animated face. The interface should not imply a clinician is watching or that a model has feelings. Clearly distinguish an experimental build from an evaluated clinical release.
 
 This document follows the token-and-prose format in the [Google Labs DESIGN.md specification](https://github.com/google-labs-code/design.md/blob/main/docs/spec.md). Tokens above define proposed values. No interface has been implemented or visually validated yet.
 
@@ -139,7 +139,7 @@ Use sentence case, normal punctuation, and direct language. Dates and durations 
 
 At a 1280 by 820 desktop window, begin with a 232px left rail and a centered conversation column up to 720px wide. Use 32px outer spacing and 24px between major groups. Respect the native title bar, macOS traffic lights, Windows window controls, and draggable regions without overlapping interactive content.
 
-The rail contains Openmind, "New conversation," a chronological session list, "Remembered context," "Schedule," and "Settings." Dates organize history. Avoid model controls and technical metrics in the conversation header.
+The rail contains Openmind, "New conversation," a chronological session list, "Your notes," "Remembered context," "Schedule," and "Settings." Dates organize history. Avoid model controls and technical metrics in the conversation header.
 
 The main view has a short title, optional session date, a readable transcript, and a composer at the bottom of the available space. A narrow margin mark identifies the selected session. User and assistant messages have explicit accessible speaker labels and enough separation to follow the exchange. Do not rely solely on left/right alignment or pale backgrounds.
 
@@ -165,7 +165,15 @@ Icons use one consistent outline set and `currentColor`. Match stroke weight to 
 
 The composer grows up to a reasonable fraction of window height and then scrolls internally. Offer send, stop while generating, and an accessible multiline shortcut hint. Start with Enter to send and Shift+Enter for a newline, with a preference to reverse the behavior. Respect IME composition and never submit during composition.
 
-During generation, show "Preparing a reply" with a static working indicator and a stop button. The initial architecture buffers output for checks, so do not simulate live typing or falsely claim that a person is thinking. Preserve the user's draft and scroll position on errors. When reading older messages, show a "New reply" affordance rather than forcing the view to the bottom.
+Before the first text arrives, show "Preparing a reply" with a static working indicator and a stop button. Append real output as checked sentence-sized units arrive; do not add a simulated typewriter delay or claim that a person is thinking. Additional full-response review can delay visible output when required. Interrupted replies remain visibly marked and do not silently disappear. Preserve the user's draft and scroll position on errors. When reading older messages, show a "New reply" affordance rather than forcing the view to the bottom.
+
+Speech-to-text input is proposed pending clarification. Add a labeled microphone control, permission-denied state, visible recording status, stop/cancel, and an editable transcript preview in the composer. Silence does not submit a message. Typing remains available. Model output stays text-only at launch; future speech playback is an explicit control with its own stop action and remote-provider disclosure.
+
+### Your notes
+
+The notebook contains short takeaways, topics to return to, and agreed next steps, separate from internal memory. Update it after a completed reply with a subtle "Updating notes" or "Notes updated" state. Note generation must not steal keyboard focus, open a panel automatically, or animate the transcript.
+
+Each generated item links to visible conversation evidence. Distinguish suggested actions from agreed actions. Users can edit, dismiss, and delete notes; a later model update cannot overwrite their edits. Show failed updates with a retry action while preserving previous notes. An empty patch produces no distracting notification.
 
 ### Connection setup
 
@@ -199,7 +207,7 @@ Use immediate feedback for send, stop, typing, selection, and frequently used na
 
 Transitions must be interruptible and specify their properties. Respect reduced motion with instant layout/state changes and static feedback. Do not animate the transcript to create a feeling of a human presence.
 
-All actions need keyboard access and visible focus. Announce complete accepted responses through a restrained live region, never each token. Test VoiceOver and NVDA, selected history items, dialogs, validation, 200% zoom, text resizing, and reduced motion. Keep icons labeled and status understandable without color.
+All actions need keyboard access and visible focus. Batch streamed text into coherent announcements through a restrained live region, never announce each token, and prevent duplicate announcements when a response completes. Test VoiceOver and NVDA, selected history items, notebook edits, recording state, dialogs, validation, 200% zoom, text resizing, and reduced motion. Keep icons labeled and status understandable without color.
 
 ## Do's and Don'ts
 

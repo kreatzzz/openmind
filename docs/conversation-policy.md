@@ -1,14 +1,16 @@
 # Conversation policy and evaluation
 
-Status: a proposed product specification. This is not a clinically validated treatment protocol. Clinical positioning, launch countries, and professional review remain open decisions.
+Status: a proposed specification for a clinical therapy product, as confirmed by Krish on September 7, 2026. This is not a clinically validated treatment protocol. Target indications, delivery model, launch countries, and professional oversight remain open decisions.
 
 ## Intended behavior
 
-Openmind should help adults reflect on events, put feelings into words, consider options, and return to goals they have chosen. Conversations can be warm and continuous without pretending that the software is a licensed therapist or a person with feelings.
+Openmind is intended to deliver clinical therapy. Define the initial condition, population, treatment approach, and independent versus clinician-supported delivery before developing treatment-specific behavior. Adults are the proposed initial population. Prototype conversations can exercise reflection and goal continuity, but these do not by themselves constitute a validated treatment.
+
+Conversations can be warm and continuous without pretending that the software is a licensed human therapist or a person with feelings. Keep intended clinical function distinct from capabilities and effectiveness actually established by evidence.
 
 Use a short onboarding explanation of what the app can do and where it falls short. Do not repeat a disclaimer on every message. Remain honest when users ask about expertise, confidentiality, memory, or emergency support.
 
-The proposed support scope follows the need for caution identified in the [APA's November 2025 advisory announcement](https://www.apa.org/news/press/releases/2025/11/ai-wellness-apps-mental-health), which describes insufficient evidence and protections for these uses. It does not establish that Openmind is effective or that a generic model becomes a therapist when given a prompt.
+The [APA's November 2025 advisory announcement](https://www.apa.org/news/press/releases/2025/11/ai-wellness-apps-mental-health) describes insufficient evidence and protections for these uses. Existing use of chatbots for therapy is evidence of demand, not evidence that Openmind or a chosen local model delivers effective clinical treatment.
 
 ## Guidance structure
 
@@ -22,6 +24,7 @@ Ship versioned text policies, structured output schemas, resource data, and eval
 | Supported exercises | Optional, reviewed reflection or grounding activities with an easy stop |
 | Safety response policy | Respond appropriately to immediate danger and other high-risk disclosures |
 | Memory policy | Separate evidence and interpretation; obey corrections and forgetting |
+| User-notebook policy | Generate source-linked takeaways and agreed actions; protect user edits and exclude internal hypotheses |
 | Output checks | Detect known harmful patterns, unsupported claims, and disallowed recommendations before display |
 
 User preferences can shape style but cannot authorize dangerous guidance or override native permissions. Custom models and custom policy variants must not inherit a quality badge from a previously evaluated configuration.
@@ -37,7 +40,7 @@ User preferences can shape style but cannot authorize dangerous guidance or over
 
 Do not use praise loops, streaks, emotional dependency, exclusivity, guilt about absence, or claims that the AI understands the user better than other people. Avoid excessive agreement, especially when the user describes a harmful belief or plan. Validate feelings without affirming unsupported claims about reality.
 
-Do not diagnose conditions, prescribe treatment, change medication, provide high-risk trauma processing, or present stored hypotheses as clinical observations. Recommendations to seek professional care should fit the situation and stay respectful.
+Until a treatment-specific protocol has appropriate review and evidence, the prototype must not independently diagnose conditions, prescribe treatment, change medication, or perform high-risk trauma processing. Stored hypotheses are never verified clinical observations. Clinical treatment scope and permitted interventions must be defined explicitly rather than inferred from a generic model's capabilities.
 
 ## High-risk conversations
 
@@ -51,17 +54,17 @@ Resource entries must be reviewed data with country, language, contact method, s
 
 No automatic calls, messages to family, emergency dispatch, or background monitoring. If future integrations perform such actions, design explicit consent, scope, and platform behavior separately. A desktop app that is closed or asleep cannot monitor a person's safety.
 
-The first implementation buffers model output for review before display. If generation or checking fails, show a brief reviewed support message and appropriate user actions. A second model reviewing the first can share the same blind spots; evaluation must include human judgment. See the [turn flow](architecture.md).
+The proposed launch implementation streams text in bounded, checked sentence-sized units and uses full-response review for cases requiring additional scrutiny. Detection of those cases is itself fallible. If generation or checking fails, stop further release, retain the exact already-displayed text with an interrupted state, and show a reviewed fallback where appropriate. Checks cannot undo prior disclosure or guarantee that a later sentence will not change meaning. A second model reviewing the first can share its blind spots; evaluate streaming-specific failures with human judgment. See [turn processing](turn-processing.md).
 
 ## Model qualification
 
-Separate "connects successfully" from "evaluated for Openmind's support workflow." A configurable endpoint is not automatically suitable for sensitive conversations.
+Separate "connects successfully" from "evaluated for a specified clinical use." A configurable endpoint is not automatically suitable for clinical therapy. Custom endpoints can be used in clearly identified development or experimental workflows, but a clinical release claim must be tied to an evaluated model, runtime, policy, and configuration. Broad provider support cannot make every connected model clinically interchangeable.
 
 Record model name, immutable digest where available, quantization, runtime version, sampling settings, context size, policy version, and supported language. A mutable model tag changing underneath the app invalidates the old evaluation association. API models without an immutable version need a retesting policy.
 
 Do not choose a recommended model solely by parameter count or benchmark popularity. Test memory extraction, humility, contradiction handling, long conversations, crisis responses, and latency on target hardware. Prototype model choices remain unselected until those results exist.
 
-## Evaluation before public beta
+## Engineering evaluation before clinical studies
 
 Use synthetic cases and consented research data only under a separately reviewed process. Ordinary user conversations are not an implicit test-data source.
 
@@ -76,13 +79,24 @@ Create at least 150 synthetic dialogue scenarios spanning ordinary support, ambi
 | Memory | Pass the evidence, retrieval, correction, and deletion criteria in `memory.md` |
 | Model identity | Evaluation record matches shipped guidance and recommended runtime/model configuration |
 | Regression | Re-run affected scenarios for policy, model, retrieval, and output-check changes |
+| User notes | Review factual support, hidden-note leakage, agreement attribution, and preservation of user edits |
+| Streaming and speech input | Evaluate cross-sentence harms, interrupted replies, transcription negation errors, and user correction before submission |
 
-A qualified mental-health reviewer should define severity and review the rubric and failures before public beta. No clinician has reviewed these documents yet. Automatic scoring can find regressions; it should not be the sole release decision.
+A qualified clinical lead should define severity and review the rubric and failures before studies with patients. No clinician has reviewed these documents yet. These synthetic engineering gates do not establish treatment efficacy or replace clinical study design. Automatic scoring can find regressions; it should not be the sole release decision.
 
-## Clinical positioning and jurisdictions
+## Clinical development and jurisdictions
 
-Marketing language and intended functionality affect obligations. Calling something "wellness" does not by itself resolve its status. The FDA reissued its [general-wellness guidance in January 2026](https://www.fda.gov/media/90652/download); its applicability to Openmind requires review of actual claims and functions. This plan does not conclude that the app is exempt from medical-device rules.
+Clinical therapy is the confirmed intended scope. Do not use a wellness label as the basis for this product's release strategy. Marketing language, functionality, intended population, and deployment jurisdiction affect the applicable requirements. The FDA's [Digital Health Advisory Committee](https://www.fda.gov/medical-devices/digital-health-center-excellence/fda-digital-health-advisory-committee) has considered generative-AI mental-health devices, including premarket evidence and postmarket monitoring. That discussion is not authorization for Openmind or a conclusion about its regulatory classification.
 
 Local storage also does not settle every privacy obligation. The [FTC's health-breach guidance](https://www.ftc.gov/business-guidance/resources/complying-ftcs-health-breach-notification-rule-0) discusses coverage for health apps outside HIPAA under defined conditions. Applicability depends on the product and data flows. Review the chosen launch jurisdictions, including local rules on AI mental-health products, before release. These US references are examples, not a worldwide legal assessment.
 
-If Openmind is intended to provide clinical therapy, create a separate clinical development plan covering intended use, qualified oversight, validated interventions, risk management, evidence, privacy rights, and regulatory review. Renaming a button or adding a disclaimer is insufficient.
+The clinical development workstream must define:
+
+- Intended condition, severity range, age group, exclusions, language, treatment approach, and whether a clinician directs care.
+- Clinical leadership, intervention protocols, escalation responsibilities, and the exact limits of unattended local operation.
+- A study design with appropriate review, consent, comparator, validated outcomes, follow-up, adverse-event handling, and analysis of benefits and harms. Choose those with qualified professionals; do not infer sample size or efficacy from synthetic chat scores.
+- A documented risk-management and change-control process linking requirements, model/policy versions, tests, known failures, and release decisions.
+- Jurisdiction-specific assessment of device requirements, professional-practice rules, privacy/access rights, and any required study or marketing permissions. Internal AI notes are not automatically legally exempt from access because they are hidden in the UI.
+- A post-deployment safety process compatible with local privacy. Do not assume automatic monitoring or add transcript uploads by default. Decide incident reporting and study data collection separately with explicit consent and applicable requirements.
+
+Engineering prototypes with synthetic data can precede clinical deployment. Clinical studies and public treatment distribution need their own evidence and authorization decisions. This plan makes no claim that prompt guidance, encryption, or a passed regression suite is sufficient to launch clinical treatment.

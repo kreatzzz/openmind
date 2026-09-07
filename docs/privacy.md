@@ -10,6 +10,8 @@ The achievable promise is encrypted storage, a restricted application interface,
 
 Recommended wording is "Your conversations and internal memory are encrypted on this device. Openmind unlocks relevant information to generate replies." Remote mode needs an additional statement that selected information is sent to the chosen provider.
 
+User-facing notes are separate records with the same at-rest encryption. Hiding the internal graph does not make it a legally privileged or exempt clinical record. Access, correction, retention, and deletion requirements need jurisdiction-specific review for the intended clinical use.
+
 If secrecy from the device owner is essential, revisit the product requirements. A trusted remote service or hardware-backed execution design changes the trust model, costs, offline access, and recovery story. Neither should be promised as a simple fix, particularly because output leakage still exists.
 
 ## Threats and limits
@@ -58,6 +60,14 @@ Keep content out of window titles, tray labels, dock previews where controllable
 - Updates and model downloads disclose normal network metadata such as IP addresses. Keep them separate from local-only conversations and explain their destinations.
 
 The implementation should follow [Tauri's security guidance](https://v2.tauri.app/security/) and verify each control in integration tests. A dependency choice does not make these controls automatic.
+
+## Speech and user-note boundaries
+
+Local dictation is the proposed launch input. Start recording only on user action and stop on cancel, timeout, lock, or device loss. Keep raw audio transient, bound its size, and disable content logging and plaintext temporary audio files. Only a user-submitted transcription becomes durable conversation evidence. OS dictation is not presumed offline; an explicit local speech adapter is the default proposal.
+
+Future ElevenLabs output sends response text to a remote speech processor even when the chat model is local. Consent is separate from model-provider consent. Send only text approved for display, never the internal graph or whole notebook. Check provider retention and account terms at integration time; do not promise zero retention by default. See [speech data flow](turn-processing.md#text-to-speech-later).
+
+The paired note writer receives visible source messages and bounded reconciliation references. The public patch may not quote or summarize private graph hypotheses. Validate source support and disclosure behavior before publishing it to the notebook; separate output fields alone do not establish isolation. Encrypted internal notes can still influence model replies, so absolute non-disclosure is not a supported promise.
 
 ## Storage, backup, and deletion
 

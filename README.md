@@ -6,13 +6,16 @@ A planned desktop app for private, ongoing conversations about life, with locall
 
 Openmind is intended to connect life events, people, recurring concerns, and goals in an encrypted memory graph. Users can start a conversation whenever they want or set a reminder for a planned session. Local inference is the default; connecting a remote API is an explicit choice.
 
-The proposed first release is an adult self-reflection and emotional-support app. Clinical therapy positioning remains an open product decision. No clinical effectiveness or therapist-equivalence claim has been established.
+The intended product is a clinical therapy app. Target conditions, clinical delivery model, launch jurisdiction, and evidence requirements still need definition. No clinical effectiveness or therapist-equivalence claim has been established.
+
+Each submitted message should lead to a streamed text reply, an update to encrypted internal memory, and an update to separate user-facing notes. The proposed launch input is typing plus local speech-to-text, pending clarification. Text-to-speech output, with a provider such as ElevenLabs, comes later.
 
 ## Start here
 
 | Document | Contents |
 | --- | --- |
 | [Architecture](docs/architecture.md) | Desktop stack, component boundaries, provider integration, session flow, and planned code layout |
+| [Turn processing](docs/turn-processing.md) | Two model calls for three results, text streaming, note updates, recovery, and speech input |
 | [Memory](docs/memory.md) | Graph schema, evidence, retrieval, corrections, and forgetting |
 | [Privacy](docs/privacy.md) | Encryption, key management, trust boundaries, backups, and limits of hidden memory |
 | [Conversation policy](docs/conversation-policy.md) | Proposed behavior, crisis handling, and evaluation requirements |

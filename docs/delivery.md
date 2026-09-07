@@ -6,18 +6,19 @@ Status: proposed sequencing and release criteria. This phase produces documents 
 
 | Stage | Deliverable | Exit evidence |
 | --- | --- | --- |
-| 0. Product decisions | Resolve support versus clinical scope, memory access, input mode, launch audience, and license | Updated decision log; agreed v1 boundaries |
+| 0. Clinical definition | Define target indication, treatment approach, independent versus clinician-supported use, memory access, input details, launch audience, and license | Clinical scope is confirmed; remaining choices recorded with a clinical development plan |
 | 1. Native feasibility | Minimal Tauri window with encrypted save/unlock, native key storage, Ollama request, cancellation, and local build on each target | Working signed test artifact where credentials exist; evidence that SQLCipher and key store work on macOS and Windows |
-| 2. Conversation prototype | Designed onboarding, model connection, one text session, buffered response review, retries, lock, and persistence | End-to-end local conversation with network trace, failure recovery, and keyboard use |
-| 3. Memory continuity | Evidence-backed nodes/edges, retrieval, corrections, forgetting, summaries, and extraction queue | Synthetic multi-session scenarios and deletion/concurrency tests pass |
+| 2. Conversation prototype | Onboarding, local dictation pending clarification, streamed text with output checks, retries, lock, and persistence | End-to-end synthetic conversation, speech draft correction, network trace, streaming recovery, and keyboard use |
+| 3. Both note systems | Evidence-backed graph, user notebook, two-call turn processing, corrections, forgetting, and derivation queue | Synthetic multi-session scenarios, user-edit protection, atomic patches, and deletion/concurrency tests pass |
 | 4. Daily-use features | History, planned sessions, reminders, private sessions, portable encrypted backup, retention settings | Restart, sleep/wake, timezone, full-quit limitations, and restore verified |
 | 5. API support | One tested compatible endpoint, BYOK setup, explicit remote consent, adapter capability failures | Contract tests and proof that local mode never falls back remotely |
-| 6. Evaluated beta | Recommended model configuration, reviewed guidance, security review, accessibility, installers, signed update path | Documented release gates below; unresolved severe issues block beta |
-| Later | Voice, managed model installation, sync, additional languages, mobile, or clinician features | Separate decisions and scoped plans |
+| 6. Evaluated engineering build | Fixed model configuration, reviewed guidance, security review, accessibility, installers, signed update path | Engineering gates pass; this does not authorize treatment deployment |
+| 7. Clinical evaluation and release | Defined protocol, qualified leadership, clinical evidence, applicable jurisdictional requirements, and follow-up process | Clinical study and public treatment release decisions are separate and supported by the required evidence and approvals |
+| Later | Text-to-speech such as ElevenLabs, managed model installation, sync, additional languages, mobile | Separate decisions and scoped plans |
 
 Do not spend the first milestone building a graph visualization. The first vertical slice should prove that a session can persist securely and run through a local model on both operating systems. Native packaging and SQLCipher integration are the early technical risks.
 
-Do not commit dates before measuring prototype latency and onboarding friction. A voice-at-launch decision expands stages 1, 2, and 6. Clinical positioning changes stage 0 and the entire evidence process.
+Do not commit dates before measuring prototype latency and onboarding friction. Speech-to-text is included provisionally in stages 1, 2, and 6; spoken model replies are deferred. The clinical workstream begins with intended use and continues alongside engineering. Do not treat an engineering beta as a clinical launch.
 
 ## macOS and Windows distribution
 
@@ -67,6 +68,9 @@ Uninstall preserves the vault by default and tells the user where it remains. A 
 | Accessibility | Keyboard-only use, visible focus, VoiceOver, NVDA, zoom, reduced motion, text contrast, narration of accepted responses |
 | Native app | Key store, file dialogs, notifications, tray behavior, sleep/wake, timezone changes, signed installer, update and uninstall |
 | Behavior | Human-reviewed synthetic conversations, memory quality, high-risk cases, long conversations, prompt injection |
+| Paired notes | Source coverage, empty patches, public-note provenance, concurrent user edits, atomic failure, backlog recovery |
+| Speech input | Local processing, explicit recording, negation/name accuracy, draft correction, silence, microphone loss, lock/cancel cleanup |
+| Clinical evidence | Separately designed outcomes, adverse-event review, defined model configuration, and applicable study/release requirements |
 
 Browser tests with a mocked native bridge verify UI behavior. They do not prove native key storage, database encryption, or installer correctness. Check Tauri's current automation support before choosing native tooling, and retain real macOS and Windows smoke testing. No development server should be started without the owner's explicit request; check for an existing one before visual QA.
 
@@ -76,15 +80,17 @@ These are prototype targets, not advertised guarantees. Record OS, CPU/GPU, RAM,
 
 - Aim for a usable unlocked shell within 2 seconds on the reference machine, excluding passphrase work and model loading.
 - Aim for p95 memory retrieval under 150 ms with 10,000 synthetic nodes on the reference machine.
-- Measure warm and cold generation, time to first provider token, time to first accepted visible response, and tokens per second separately. Buffered output checking changes visible latency.
+- Measure warm and cold generation, time to first provider token, time to first checked visible sentence, complete-response time, and tokens per second separately. Include any extra classifier or review-model overhead.
+- Measure both-note commit latency, queue age, retries, and backlog coverage separately from conversation latency. Compare two calls with three calls and record the model/runtime used; do not assume a speedup without measurement.
+- Measure local transcription latency and combined ASR/LLM memory pressure. Speech recognition must not silently offload audio to a remote provider when the local machine is slow.
 - Initial usability target is an accepted short response within 15 seconds when warm on a 16 GB Apple Silicon reference machine and a documented Windows 11 x64 reference machine. Choose the Windows GPU/CPU configuration before comparison. If missed, adjust model, response length, or scope based on evidence.
 - Target visible stop feedback within 100 ms. Confirm provider-stream cancellation and separately measure when local GPU work actually stops; do not claim they are identical.
 - Target no inference while locked and near-zero background CPU while idle. Measure shell memory separately from the multi-GB model process.
 
 ## Release gates and ownership
 
-Krish owns product scope, visual direction, license, and release approval. Engineering owns integrity, packaging, and measurable acceptance checks. A qualified mental-health reviewer owns review of the conversation rubric and known behavior failures; an independent security reviewer assesses the sensitive boundaries. Those reviewers have not been assigned.
+Krish owns product scope, visual direction, license, and product release approval. Engineering owns integrity, packaging, and measurable acceptance checks. A qualified clinical lead owns treatment protocol and clinical evaluation with appropriate professional and regulatory input; an independent security reviewer assesses the sensitive boundaries. Those roles have not been assigned. Owner approval alone does not establish clinical effectiveness or satisfy jurisdictional requirements.
 
-Before public beta, resolve launch jurisdiction, verify resources, complete threat-model review, demonstrate correction and deletion, restore a portable encrypted backup, test signed upgrades, review accessibility on both OSes, and publish accurate model/privacy limitations. Passing a fixed evaluation suite is evidence about that suite, not proof of clinical effectiveness.
+Before clinical evaluation with patients, define the [clinical development requirements](conversation-policy.md#clinical-development-and-jurisdictions), verify resources, complete threat-model review, demonstrate correction and deletion across both note systems, restore a portable encrypted backup, test signed upgrades, and review accessibility on both OSes. Public treatment distribution needs a separate release decision based on clinical evidence and applicable requirements. Passing a fixed engineering suite is evidence about that suite, not proof of clinical effectiveness.
 
 The next implementation task, once requested, should be the narrow native feasibility prototype in stage 1.
