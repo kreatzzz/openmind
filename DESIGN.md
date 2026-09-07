@@ -117,7 +117,7 @@ Proposed direction, pending visual review with Krish. The interface should give 
 
 The intended product is clinical therapy, with the treatment model and evidence still to be defined. The app is honest about being AI. Avoid a human therapist avatar, relationship status, or an animated face. The interface should not imply a clinician is watching or that a model has feelings. Clearly distinguish an experimental build from an evaluated clinical release.
 
-This document follows the token-and-prose format in the [Google Labs DESIGN.md specification](https://github.com/google-labs-code/design.md/blob/main/docs/spec.md). Tokens above define proposed values. No interface has been implemented or visually validated yet.
+This document follows the token-and-prose format in the [Google Labs DESIGN.md specification](https://github.com/google-labs-code/design.md/blob/main/docs/spec.md). Tokens above define proposed values. The light-mode engineering preview implements the welcome, conversation, vault, and connection screens. Browser screenshots have been reviewed; native macOS/Windows visual and assistive-technology validation remains open. Dark mode and the remaining product screens are proposed.
 
 ## Colors
 

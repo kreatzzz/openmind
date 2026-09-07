@@ -1,0 +1,1 @@
+Openmind bundles Inter and Newsreader from Fontsource. Their SIL Open Font License notices are included here. This directory is copied into the app assets. The project itself does not yet have a selected software license; these notices apply to the fonts only.

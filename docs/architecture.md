@@ -1,6 +1,6 @@
 # Architecture
 
-Status: proposed. Read [decisions](decisions.md) for assumptions and [delivery](delivery.md) for the prototype gates.
+Status: full-product proposal, with a [limited desktop prototype](prototype.md) implemented. Read [decisions](decisions.md) for assumptions and [delivery](delivery.md) for the prototype gates.
 
 Openmind is intended as a clinical therapy application. Its Rust backend should own the user's vault, conversation state, provider connections, internal memory, and user-facing notebook updates. The React interface displays conversations and asks for narrow operations. A model receives only the context needed for the current task. Clinical intent does not establish clinical effectiveness; see the [clinical development requirements](conversation-policy.md#clinical-development-and-jurisdictions).
 

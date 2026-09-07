@@ -1,6 +1,6 @@
 # Decisions and questions
 
-Planning began September 6, 2026; requirements updated September 7, 2026. No implementation decisions below have been validated by a running prototype.
+Planning began September 6, 2026; requirements updated September 7, 2026. A desktop engineering preview now exercises the shell, encrypted vault, and Ollama streaming. See [prototype status](prototype.md) for the implemented subset and its limitations.
 
 ## Confirmed requirements
 
