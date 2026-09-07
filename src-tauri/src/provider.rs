@@ -993,7 +993,7 @@ mod tests {
             },
         )
         .await;
-        assert!(result.is_ok(), "local Ollama request failed");
+        assert!(result.is_ok(), "local Ollama request failed: {result:?}");
         assert!(errors.is_empty(), "stream emitted a provider error");
         assert!(!chunks.concat().trim().is_empty(), "stream was empty");
     }
