@@ -296,6 +296,7 @@ where
         model,
         messages: &messages,
         stream: true,
+        think: false,
         options: ChatOptions {
             num_ctx: MODEL_CONTEXT_TOKENS,
             num_predict: MAX_PREDICT_TOKENS,
@@ -378,6 +379,7 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     stream: bool,
+    think: bool,
     options: ChatOptions,
 }
 
@@ -856,6 +858,7 @@ mod tests {
             model: "llama3.2",
             messages: &messages,
             stream: true,
+            think: false,
             options: ChatOptions {
                 num_ctx: MODEL_CONTEXT_TOKENS,
                 num_predict: MAX_PREDICT_TOKENS,
@@ -863,6 +866,7 @@ mod tests {
         })
         .expect("request serializes");
         assert_eq!(request["stream"], true);
+        assert_eq!(request["think"], false);
         assert_eq!(request["options"]["num_ctx"], MODEL_CONTEXT_TOKENS);
         assert_eq!(request["options"]["num_predict"], MAX_PREDICT_TOKENS);
     }
@@ -973,7 +977,7 @@ mod tests {
         let base_url = std::env::var("OPENMIND_TEST_OLLAMA_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:11439".to_owned());
         let model =
-            std::env::var("OPENMIND_TEST_MODEL").unwrap_or_else(|_| "gemma3:270m".to_owned());
+            std::env::var("OPENMIND_TEST_MODEL").unwrap_or_else(|_| "qwen3:0.6b".to_owned());
         let mut chunks = Vec::new();
         let mut errors = Vec::new();
         let result = generate(

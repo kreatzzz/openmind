@@ -9,7 +9,7 @@ The first implementation is a single-user desktop foundation. It is not an evalu
 - A random 32-byte SQLCipher database key, wrapped using Argon2id and XChaCha20Poly1305. The authenticated envelope fixes and bounds KDF parameters. A vault file lock prevents two app processes from opening it simultaneously.
 - Ollama model discovery and streaming over an explicitly configured HTTP loopback endpoint. The adapter rejects redirects, proxies, non-loopback hosts, and recognized cloud model metadata. The runtime remains a separate trust boundary.
 - One active generation, stop control, persistence before displaying chunks, and rejection of late writes after locking.
-- At most 20 recent messages and 6,000 UTF-8 bytes of conversation context. Each request asks for an 8,192-token context and at most 1,024 output tokens. These are conservative prototype limits, not validated budgets for every model or tokenizer.
+- At most 20 recent messages and 6,000 UTF-8 bytes of conversation context. Each request asks for an 8,192-token context and at most 1,024 output tokens. Extended thinking is disabled in the request. These are conservative prototype limits, not validated budgets for every model or tokenizer.
 
 The browser view offers a clearly labeled synthetic sample. Native vault and inference operations require the desktop shell. Connection and reading preferences currently last only for the open app instance.
 
@@ -55,8 +55,12 @@ An ignored provider smoke test can connect to a separately started Ollama instan
 
 ```sh
 OPENMIND_TEST_OLLAMA_URL=http://127.0.0.1:11439 \
-OPENMIND_TEST_MODEL=gemma3:270m \
+OPENMIND_TEST_MODEL=qwen3:0.6b \
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features live_ -- --ignored
 ```
 
 This verifies the protocol using a synthetic prompt. It does not assess therapeutic behavior.
+
+## Verification recorded September 7, 2026
+
+The Linux native build, 24 core regression tests, four UI lifecycle tests, and a real Ollama stream using `qwen3:0.6b` passed. `gemma3:270m` returned empty completions under the same prompt in this environment; empty or whitespace-only replies now end as interrupted provider failures. The model fixture establishes protocol operation only. macOS CI passed; Windows CI is tracked in the pull request.
