@@ -13,11 +13,17 @@ vi.mock("./lib/desktop", () => ({
   isDesktop: true,
   desktop: {
     getVaultStatus: vi.fn(),
+    openDemo: vi.fn(),
+    listNotes: vi.fn(),
+    editNote: vi.fn(),
+    deleteNote: vi.fn(),
+    retryNotes: vi.fn(),
     createVault: vi.fn(),
     unlockVault: vi.fn(),
     lockVault: vi.fn(),
     listSessions: vi.fn(),
     createSession: vi.fn(),
+    deleteSession: vi.fn(),
     listMessages: vi.fn(),
     listModels: vi.fn(),
     sendMessage: vi.fn(),
@@ -65,7 +71,9 @@ beforeEach(() => {
   vi.mocked(desktop.getVaultStatus).mockResolvedValue({
     exists: true,
     unlocked: true,
+    isDemo: false,
   });
+  vi.mocked(desktop.listNotes).mockResolvedValue([]);
   vi.mocked(desktop.listSessions).mockResolvedValue([session]);
   vi.mocked(desktop.listMessages).mockResolvedValue([]);
   vi.mocked(desktop.createSession).mockResolvedValue(session);
@@ -226,5 +234,127 @@ describe("native conversation lifecycle", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Connection unavailable.",
     );
+  });
+});
+
+describe("demo and notebook", () => {
+  it("opens a seeded demo without creating a personal vault", async () => {
+    vi.mocked(desktop.getVaultStatus).mockResolvedValue({
+      exists: false,
+      unlocked: false,
+      isDemo: false,
+    });
+    vi.mocked(desktop.openDemo).mockResolvedValue({
+      exists: true,
+      unlocked: true,
+      isDemo: true,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open demo" }));
+    await screen.findByText("Demo workspace · Synthetic data only");
+    expect(desktop.openDemo).toHaveBeenCalledWith("demo", "openmind-demo-2026");
+    expect(desktop.createVault).not.toHaveBeenCalled();
+  });
+  it("deletes a conversation only after confirmation and clears its notes", async () => {
+    vi.mocked(desktop.deleteSession).mockResolvedValue();
+    vi.mocked(desktop.listNotes).mockResolvedValue([
+      {
+        id: "delete-note",
+        sessionId: session.id,
+        sourceMessageId: "delete-source",
+        kind: "takeaway",
+        content: "A synthetic note to delete.",
+        evidenceQuote: "Synthetic quote.",
+        revision: 1,
+        edited: false,
+        createdAt: session.createdAt,
+        updatedAt: session.createdAt,
+      },
+    ]);
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Delete conversation",
+      }),
+    );
+    expect(desktop.deleteSession).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Delete conversation" }).at(-1)!,
+    );
+    await waitFor(() =>
+      expect(desktop.deleteSession).toHaveBeenCalledWith(session.id),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByText(session.title)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Your notes" }));
+    expect(screen.getByText("No notes yet")).toBeInTheDocument();
+  });
+  it("retries notes for a completed reply without resending it", async () => {
+    vi.mocked(desktop.listMessages).mockResolvedValue([
+      {
+        id: "reply-1",
+        sessionId: session.id,
+        role: "assistant",
+        content: "A completed fictional reply.",
+        status: "complete",
+        createdAt: session.createdAt,
+      },
+    ]);
+    const updating = deferred<void>();
+    vi.mocked(desktop.retryNotes).mockReturnValue(updating.promise);
+    await openConnectedApp();
+    fireEvent.click(screen.getByRole("button", { name: "Update notes" }));
+    expect(desktop.retryNotes).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: "reply-1",
+        model: "synthetic-model",
+      }),
+    );
+    expect(screen.getByRole("button", { name: "Update notes" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Stop reply" }));
+    expect(desktop.cancelTurn).toHaveBeenCalledOnce();
+    await act(async () => {
+      updating.resolve();
+      await updating.promise;
+    });
+    expect(desktop.sendMessage).not.toHaveBeenCalled();
+  });
+  it("saves a note using its revision and keeps its source evidence", async () => {
+    const note = {
+      id: "note-1",
+      sessionId: session.id,
+      sourceMessageId: "source-1",
+      kind: "takeaway" as const,
+      content: "A fictional takeaway.",
+      evidenceQuote: "A fictional source quote.",
+      revision: 3,
+      edited: false,
+      createdAt: session.createdAt,
+      updatedAt: session.createdAt,
+    };
+    vi.mocked(desktop.listNotes).mockResolvedValue([note]);
+    vi.mocked(desktop.editNote).mockResolvedValue({
+      ...note,
+      content: "My corrected takeaway.",
+      revision: 4,
+      edited: true,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Your notes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit note" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Edit note" }), {
+      target: { value: "My corrected takeaway." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save note" }));
+    await screen.findByText("My corrected takeaway.");
+    expect(desktop.editNote).toHaveBeenCalledWith(
+      "note-1",
+      "My corrected takeaway.",
+      3,
+    );
+    expect(screen.getByText("A fictional source quote.")).toBeInTheDocument();
+    expect(screen.getByText("Edited by you")).toBeInTheDocument();
   });
 });

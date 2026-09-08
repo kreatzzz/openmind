@@ -24,13 +24,33 @@ export interface ModelInfo {
 export interface VaultStatus {
   exists: boolean;
   unlocked: boolean;
+  isDemo: boolean;
+}
+
+export interface UserNote {
+  id: string;
+  sessionId: string;
+  sourceMessageId: string;
+  kind: "takeaway" | "question" | "next_step";
+  content: string;
+  evidenceQuote: string;
+  revision: number;
+  edited: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type TurnEvent =
   | { type: "message"; message: Message }
   | { type: "chunk"; messageId: string; content: string }
   | { type: "finished"; messageId: string; status: "complete" | "interrupted" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | {
+      type: "notes";
+      messageId: string;
+      status: "updating" | "complete" | "failed";
+      message?: string;
+    };
 
 export const isDesktop = isTauri();
 
@@ -56,6 +76,37 @@ function native<T>(
 
 export const desktop = {
   getVaultStatus: () => native<VaultStatus>("get_vault_status"),
+  openDemo: (loginId: string, passphrase: string) =>
+    native<VaultStatus>("open_demo", { loginId, passphrase }),
+  listNotes: () => native<UserNote[]>("list_notes"),
+  editNote: (id: string, content: string, expectedRevision: number) =>
+    native<UserNote>("edit_note", { id, content, expectedRevision }),
+  deleteNote: (id: string, expectedRevision: number) =>
+    native<void>("delete_note", { id, expectedRevision }),
+  async retryNotes({
+    messageId,
+    baseUrl,
+    model,
+    onEvent,
+  }: {
+    messageId: string;
+    baseUrl: string;
+    model: string;
+    onEvent: (event: TurnEvent) => void;
+  }): Promise<void> {
+    const channel = new Channel<TurnEvent>();
+    channel.onmessage = onEvent;
+    try {
+      await native<void>("retry_notes", {
+        messageId,
+        baseUrl,
+        model,
+        onEvent: channel,
+      });
+    } finally {
+      channel.onmessage = () => {};
+    }
+  },
   createVault: (passphrase: string) =>
     native<void>("create_vault", { passphrase }),
   unlockVault: (passphrase: string) =>
@@ -63,6 +114,7 @@ export const desktop = {
   lockVault: () => native<void>("lock_vault"),
   listSessions: () => native<Session[]>("list_sessions"),
   createSession: () => native<Session>("create_session"),
+  deleteSession: (id: string) => native<void>("delete_session", { id }),
   listMessages: (sessionId: string) =>
     native<Message[]>("list_messages", { sessionId }),
   listModels: (baseUrl: string) =>

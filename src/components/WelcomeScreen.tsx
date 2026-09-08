@@ -34,31 +34,15 @@ export function WelcomeScreen({
       <header className="welcome-header">
         <div className="rail-brand">
           <Mark />
-          <span>openmind</span>
+          <span>Openmind</span>
         </div>
         <span className="preview-badge">Engineering preview</span>
       </header>
       <div className="welcome-body">
         <div className="welcome-copy">
-          <div className="eyebrow">
-            <span className="margin-line" />A SPACE FOR REFLECTION
-          </div>
-          <h1>
-            A little room
-            <br />
-            for what's on
-            <br />
-            <em>your mind.</em>
-          </h1>
-          <p>
-            A private place to put thoughts into words.
-            <br />
-            One conversation at a time.
-          </p>
-          <div className="welcome-rule" />
-          <span className="welcome-caption">
-            Built for your device. At your own pace.
-          </span>
+          <div className="eyebrow">YOUR WORKSPACE</div>
+          <h1>Welcome to Openmind</h1>
+          <p>Conversations and notes, together on your device.</p>
         </div>
         <section className="vault-panel">
           {screen === "loading" ? (
@@ -68,12 +52,12 @@ export function WelcomeScreen({
               <span className="panel-icon">
                 <BookOpen size={23} strokeWidth={1.5} />
               </span>
-              <h2>Take a look around.</h2>
+              <h2>Try the demo</h2>
               <p>
                 Explore a fictional conversation and get a feel for Openmind.
               </p>
               <button className="primary-button wide" onClick={onExploreSample}>
-                Explore a sample <ArrowRight size={17} />
+                Open demo <ArrowRight size={17} />
               </button>
               <div className="panel-note">
                 <ShieldCheck size={18} />
@@ -91,8 +75,8 @@ export function WelcomeScreen({
               </span>
               <h2>
                 {screen === "setup"
-                  ? "Make this space yours."
-                  : "Welcome back."}
+                  ? "Create your vault"
+                  : "Unlock your workspace"}
               </h2>
               <p>
                 {screen === "setup"
@@ -155,6 +139,22 @@ export function WelcomeScreen({
                   <ArrowRight size={17} />
                 </button>
               </form>
+              <div className="demo-entry">
+                <p>
+                  Just exploring? Start with fictional conversations and
+                  editable notes.
+                </p>
+                <button
+                  className="secondary-button wide"
+                  onClick={onExploreSample}
+                  disabled={busy}
+                >
+                  Open demo <ArrowRight size={16} />
+                </button>
+                <span className="field-hint">
+                  No personal account needed. Demo login: <code>demo</code>
+                </span>
+              </div>
               <div className="panel-note">
                 <ShieldCheck size={18} />
                 <p>
@@ -168,9 +168,7 @@ export function WelcomeScreen({
         </section>
       </div>
       <footer className="welcome-footer">
-        <span>
-          OPENMIND <span className="footer-divider">/</span> EARLY EXPLORATIONS
-        </span>
+        <span>Openmind desktop preview</span>
         <span>Experimental software. Not evaluated clinical care.</span>
       </footer>
     </main>

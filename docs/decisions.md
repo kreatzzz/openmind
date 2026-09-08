@@ -11,7 +11,8 @@ Planning began September 6, 2026; requirements updated September 7, 2026. A desk
 - An Obsidian-like network of memories maintained by the AI.
 - Encrypted internal notes, with the intended degree of user access still to resolve.
 - Planned sessions and conversations started at any time.
-- A polished, distinctive interface.
+- A polished interface based on Vercel's Geist design system, confirmed September 8.
+- One-click demo access with public test credentials and an isolated synthetic-data vault.
 - Clinical therapy is the intended product scope. Specific indications and clinical delivery model remain open.
 - Streamed text responses from the model at launch; text-to-speech output comes later, with ElevenLabs as an example provider.
 - Three results from submitted input: updated encrypted internal notes, a response, and updated notes for the user. Execution order and optimization are delegated to architecture design.

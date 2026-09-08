@@ -4,18 +4,26 @@ The first implementation is a single-user desktop foundation. It is not an evalu
 
 ## Implemented
 
-- Tauri 2 shell, React conversation interface, local bundled fonts, responsive navigation and keyboard-accessible dialogs.
+- Tauri 2 shell and a Geist-inspired React interface with bundled Geist fonts, light/dark/system appearance, searchable session history, responsive navigation, and keyboard-accessible dialogs.
 - Passphrase creation and unlock, encrypted sessions and messages, explicit lock, and interrupted-reply recovery.
 - A random 32-byte SQLCipher database key, wrapped using Argon2id and XChaCha20Poly1305. The authenticated envelope fixes and bounds KDF parameters. A vault file lock prevents two app processes from opening it simultaneously.
 - Ollama model discovery and streaming over an explicitly configured HTTP loopback endpoint. The adapter rejects redirects, proxies, non-loopback hosts, and recognized cloud model metadata. The runtime remains a separate trust boundary.
 - One active generation, stop control, persistence before displaying chunks, and rejection of late writes after locking.
+- A second, structured Ollama call after a completed reply proposes internal memory and user notes together. Both branches require exact quotes from the current user message and commit in one encrypted transaction. Empty patches are valid. Quotes establish provenance, not semantic or clinical correctness.
+- An editable notebook with source links and revision checks. Generation adds records for its own turn and cannot overwrite existing edits. Note deletion erases its content while retaining a tombstone. Conversation deletion cascades to its messages, notebook entries, internal memory, and note jobs.
+- Bounded retrieval of recent internal memory for later replies, clearly marked as untrusted historical context. Current input takes priority in the context budget.
+- Durable notes jobs and explicit retry without resending the reply. Cancelled, interrupted, or malformed derivations leave existing notes intact. Reopening a vault marks unfinished jobs as failed. Completed replies can retry notes; interrupted replies do not generate notes.
+- Migration from the original conversation-only vault schema to schema version 2. Unknown future schemas are refused.
+- A separate seeded demo vault opened with one click. It cannot unlock or replace the personal vault.
 - At most 20 recent messages and 6,000 UTF-8 bytes of conversation context. Each request asks for an 8,192-token context and at most 1,024 output tokens. Extended thinking is disabled in the request. These are conservative prototype limits, not validated budgets for every model or tokenizer.
 
-The browser view offers a clearly labeled synthetic sample. Native vault and inference operations require the desktop shell. Connection and reading preferences currently last only for the open app instance.
+The browser view offers a clearly labeled synthetic sample. Native vault and inference operations require the desktop shell. Connection and reading preferences currently last only for the open app instance. Only the appearance preference is saved in webview local storage.
 
 ## Not implemented
 
-Internal memory, generated user notes, note editing, correction and deletion controls, summaries, remote APIs, speech input/output, reminders, keychain convenience unlock, OS lock/suspend handling, automatic idle lock, encrypted backup/export, migrations beyond schema version 1, and signed updates are future work.
+Entity reconciliation and explicit relationships between memory nodes, semantic retrieval, internal-memory correction controls, summaries, transcript editing, remote APIs, speech input/output, reminders, keychain convenience unlock, OS lock/suspend handling, automatic idle lock, encrypted backup/export, and signed updates are future work.
+
+The current extraction reads only the user message for its turn. It does not derive commitments from the assistant response, merge older entities, or process interrupted replies. One model request runs at a time, so a new reply waits until the notes request finishes or is stopped. This is the first implementation of the two-call design, not the complete job scheduling and graph specification. Deleting a notebook entry does not remove its source or internal memory; delete the conversation to remove all of those records from the active vault. Existing backups are outside that deletion.
 
 The current prompt is basic experimental guidance. There is no clinical input classifier, sentence-level output review, crisis detection evaluation, or clinical efficacy evaluation. Stream batching is for rendering and database efficiency; it is not safety review. UI state is cleared on lock, but JavaScript strings and model-runtime memory cannot be reliably erased. Locking closes Openmind's database connection and cancels its generation request; it does not unload a third-party runtime's model or erase its logs. Cancellation is cooperative, so the in-flight task may retain plaintext briefly after the lock command returns.
 
@@ -35,6 +43,17 @@ bun run test:core
 cargo check --manifest-path src-tauri/Cargo.toml --locked
 ```
 
+## Test access
+
+Choose **Open demo** on the welcome or lock screen. No personal account or vault setup is needed.
+
+| Field | Value |
+| --- | --- |
+| Demo login ID | `demo` |
+| Demo password | `openmind-demo-2026` |
+
+The button supplies these public demo credentials automatically. They apply only to the separate `demo-vault` directory beside the personal `vault`. Three fictional conversations and three notes are seeded on first use. Demo edits persist between visits; the browser sample is temporary. The demo password is deliberately public, so use fictional input only. A model connection is required for new generated replies and notes; reading and editing seeded notes works without Ollama. Deleting every demo conversation causes fixtures to be seeded again on the next demo open.
+
 Start the native development app when wanted:
 
 ```sh
@@ -51,7 +70,7 @@ Bundle configuration targets macOS app/DMG and Windows NSIS. Run native builds o
 
 The vault lives under Tauri's per-user app-data directory for `io.github.kreatzzz.openmind`, in its `vault` subdirectory. Do not commit that directory or include it in issue reports. Examples and tests must contain only synthetic text.
 
-An ignored provider smoke test can connect to a separately started Ollama instance:
+Ignored provider smoke tests can connect to a separately started Ollama instance:
 
 ```sh
 OPENMIND_TEST_OLLAMA_URL=http://127.0.0.1:11439 \
@@ -59,7 +78,7 @@ OPENMIND_TEST_MODEL=qwen3:0.6b \
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features live_ -- --ignored
 ```
 
-This verifies the protocol using a synthetic prompt. It does not assess therapeutic behavior.
+These verify streaming and structured extraction using synthetic prompts. It does not assess therapeutic behavior.
 
 ## Linux startup troubleshooting
 
@@ -79,6 +98,8 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 bun run tauri dev
 
 This was verified on the development machine on September 8, 2026: the native Wayland window opened and rendered the vault setup screen. The setting applies only to this invocation. It does not change compositor configuration or disable the WebKit sandbox. No X11 override was needed with this setting.
 
-## Verification recorded September 7, 2026
+## Verification recorded September 8, 2026
 
-The Linux native build, 24 core regression tests, four UI lifecycle tests, and a real Ollama stream using `qwen3:0.6b` passed. `gemma3:270m` returned empty completions under the same prompt in this environment; empty or whitespace-only replies now end as interrupted provider failures. The model fixture establishes protocol operation only. macOS CI passed; Windows CI is tracked in the pull request.
+The production frontend build, eight UI tests, 40 core regression tests, Clippy with warnings denied, formatting, and native Linux compilation pass. Two opt-in live Ollama tests pass using `qwen3:0.6b`, covering streaming and structured notes extraction. Native keyboard testing opened the separate demo, sent a fictional message, displayed the saved reply, and completed the notes update. Browser checks covered the notebook editor, dark appearance, and narrow layouts without page errors or horizontal overflow.
+
+The small Ollama fixture establishes protocol operation only. Its responses have not passed the proposed conversation-policy evaluations and must not be treated as clinical guidance. macOS and Windows CI passed the preceding desktop foundation revision; the pull request tracks checks for subsequent changes. Signed installers remain unverified.

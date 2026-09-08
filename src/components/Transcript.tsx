@@ -1,9 +1,10 @@
-import type { RefObject } from "react";
+import { useEffect, type RefObject } from "react";
 import { Square } from "lucide-react";
 import type { Message, Session } from "../lib/desktop";
 import { Mark } from "./Mark";
 
 export function Transcript({
+  highlight,
   messages,
   session,
   sample,
@@ -11,6 +12,7 @@ export function Transcript({
   scroll,
   onScroll,
 }: {
+  highlight?: string | null;
   messages: Message[];
   session: Session | undefined;
   sample: boolean;
@@ -18,6 +20,12 @@ export function Transcript({
   scroll: RefObject<HTMLDivElement | null>;
   onScroll: () => void;
 }) {
+  useEffect(() => {
+    if (highlight)
+      document
+        .getElementById(`message-${highlight}`)
+        ?.scrollIntoView?.({ block: "center" });
+  }, [highlight]);
   return (
     <div className="transcript-scroll" ref={scroll} onScroll={onScroll}>
       <div className="conversation-column">
@@ -48,6 +56,8 @@ export function Transcript({
               {messages.map((message) => (
                 <article
                   key={message.id}
+                  id={`message-${message.id}`}
+                  data-highlight={highlight === message.id || undefined}
                   className={`message message-${message.role}`}
                   aria-label={message.role === "user" ? "You" : "Openmind AI"}
                 >
@@ -83,13 +93,9 @@ export function Transcript({
           <div className="empty-conversation">
             <div className="eyebrow">
               <span className="margin-line" />
-              YOUR OWN PACE
+              NEW CONVERSATION
             </div>
-            <h1>
-              What would you like
-              <br />
-              to talk about?
-            </h1>
+            <h1>What's on your mind?</h1>
             <p>
               Start wherever you are.
               <br />A thought, a question, or something from your day.

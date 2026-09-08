@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     models::{Message, MessageRole, MessageStatus, Session},
+    notes::{NotePatch, NotesInput, UserNote},
     vault::Vault,
 };
 
@@ -27,12 +28,32 @@ pub enum TurnEvent {
     Error {
         message: String,
     },
+    #[serde(rename_all = "camelCase")]
+    Notes {
+        message_id: String,
+        status: NotesStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotesStatus {
+    Updating,
+    Complete,
+    Failed,
+}
+
+pub const DEMO_ID: &str = "demo";
+pub const DEMO_PASSPHRASE: &str = "openmind-demo-2026";
+
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VaultStatus {
     pub exists: bool,
     pub unlocked: bool,
+    pub is_demo: bool,
 }
 
 struct ActiveTurn {
@@ -40,10 +61,32 @@ struct ActiveTurn {
     cancel: CancellationToken,
 }
 
+struct ActiveNotes {
+    attempt_id: String,
+    message_id: String,
+    cancel: CancellationToken,
+}
+
+pub struct PreparedNotes {
+    pub attempt_id: String,
+    pub input: NotesInput,
+    pub cancel: CancellationToken,
+}
+
+/// The durable reply status and the atomically reserved notes job, if any.
+/// A notes-claim error is kept inside this result so a completed reply is
+/// still handed to the UI and remains persisted.
+pub struct FinishedTurn {
+    pub status: MessageStatus,
+    pub notes: Result<Option<PreparedNotes>, String>,
+}
+
 #[derive(Default)]
 struct State {
     vault: Option<Vault>,
     active: Option<ActiveTurn>,
+    notes_active: Option<ActiveNotes>,
+    is_demo: bool,
 }
 
 pub struct Engine {
@@ -55,6 +98,7 @@ pub struct PreparedTurn {
     pub user: Message,
     pub assistant: Message,
     pub history: Vec<Message>,
+    pub memory: String,
     pub cancel: CancellationToken,
 }
 
@@ -73,9 +117,11 @@ impl Engine {
     }
 
     pub fn status(&self) -> Result<VaultStatus, String> {
+        let state = self.state()?;
         Ok(VaultStatus {
-            exists: Vault::exists(&self.directory),
-            unlocked: self.state()?.vault.is_some(),
+            exists: Vault::exists(self.directory_for(state.is_demo)),
+            unlocked: state.vault.is_some(),
+            is_demo: state.is_demo,
         })
     }
 
@@ -91,9 +137,51 @@ impl Engine {
                 .finish_assistant_message(&active.message_id, MessageStatus::Interrupted)
                 .map_err(|error| error.to_string())?;
         }
+        if let Some(notes) = state.notes_active.take() {
+            notes.cancel.cancel();
+            if let Some(vault) = state.vault.as_mut() {
+                vault
+                    .fail_notes(&notes.message_id)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         Ok(VaultStatus {
-            exists: Vault::exists(&self.directory),
+            exists: Vault::exists(self.directory_for(state.is_demo)),
             unlocked: state.vault.is_some(),
+            is_demo: state.is_demo,
+        })
+    }
+
+    fn directory_for(&self, is_demo: bool) -> PathBuf {
+        if is_demo {
+            self.directory.with_file_name("demo-vault")
+        } else {
+            self.directory.clone()
+        }
+    }
+
+    pub fn open_demo(&self, login_id: &str, passphrase: &str) -> Result<VaultStatus, String> {
+        if login_id != DEMO_ID || passphrase != DEMO_PASSPHRASE {
+            return Err("Use demo and openmind-demo-2026 for the sample vault.".into());
+        }
+        let mut state = self.state()?;
+        if state.vault.is_some() {
+            return Err("Lock the current vault before opening the demo.".into());
+        }
+        let directory = self.directory_for(true);
+        let mut vault = if Vault::exists(&directory) {
+            Vault::open(&directory, DEMO_PASSPHRASE)
+        } else {
+            Vault::create(&directory, DEMO_PASSPHRASE)
+        }
+        .map_err(|error| error.to_string())?;
+        seed_demo(&mut vault).map_err(|error| error.to_string())?;
+        state.vault = Some(vault);
+        state.is_demo = true;
+        Ok(VaultStatus {
+            exists: true,
+            unlocked: true,
+            is_demo: true,
         })
     }
 
@@ -109,6 +197,7 @@ impl Engine {
         }
         .map_err(|error| error.to_string())?;
         state.vault = Some(vault);
+        state.is_demo = false;
         Ok(())
     }
 
@@ -121,6 +210,13 @@ impl Engine {
                     vault.finish_assistant_message(&active.message_id, MessageStatus::Interrupted);
             }
         }
+        if let Some(notes) = state.notes_active.take() {
+            notes.cancel.cancel();
+            if let Some(vault) = state.vault.as_mut() {
+                let _ = vault.fail_notes(&notes.message_id);
+            }
+        }
+        state.is_demo = false;
         // Release the vault even if the final status could not be persisted.
         // Opening it again recovers unfinished messages as interrupted.
         state.vault.take();
@@ -152,6 +248,19 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
+    pub fn delete_session(&self, id: &str) -> Result<(), String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop the current operation before deleting a conversation.".into());
+        }
+        state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .delete_session(id)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>, String> {
         self.state()?
             .vault
@@ -166,17 +275,31 @@ impl Engine {
             return Err("Write a message of up to 6,000 UTF-8 bytes before sending.".into());
         }
         let mut state = self.state()?;
-        if state.active.is_some() {
+        if state.active.is_some() || state.notes_active.is_some() {
             return Err("Wait for the current reply to finish, or stop it first.".into());
         }
         let vault = state.vault.as_mut().ok_or("Unlock your vault first.")?;
         let mut history = vault
             .list_messages(session_id)
             .map_err(|error| error.to_string())?;
+        let memory = vault
+            .memory_context(1_000)
+            .map_err(|error| error.to_string())?;
         let (user, assistant) = vault
             .begin_turn(session_id, content)
             .map_err(|error| error.to_string())?;
         history.push(user.clone());
+        // Always keep the current input intact. Saved context gets only spare room.
+        let memory = if content.len() + memory.len() + 180 <= 6_000 {
+            memory
+        } else {
+            String::new()
+        };
+        let history_budget = if memory.is_empty() {
+            6_000
+        } else {
+            6_000 - memory.len() - 180
+        };
         let cancel = CancellationToken::new();
         state.active = Some(ActiveTurn {
             message_id: assistant.id.clone(),
@@ -185,7 +308,8 @@ impl Engine {
         Ok(PreparedTurn {
             user,
             assistant,
-            history: recent_context(history),
+            history: recent_context(history, history_budget),
+            memory,
             cancel,
         })
     }
@@ -211,44 +335,192 @@ impl Engine {
         status: MessageStatus,
     ) -> Result<Option<MessageStatus>, String> {
         let mut state = self.state()?;
-        let Some(active) = state.active.as_ref() else {
+        finish_turn_locked(&mut state, message_id, status)
+    }
+
+    /// Finish a response and reserve its notes job while holding the same
+    /// engine mutex. This closes the interval where another turn or a stop
+    /// request could otherwise arrive before `notes_active` is registered.
+    /// Errors claiming notes stay attached to the successful reply result.
+    pub fn finish_turn_and_prepare_notes(
+        &self,
+        message_id: &str,
+        status: MessageStatus,
+    ) -> Result<Option<FinishedTurn>, String> {
+        let mut state = self.state()?;
+        let Some(status) = finish_turn_locked(&mut state, message_id, status)? else {
             return Ok(None);
         };
-        if active.message_id != message_id {
-            return Ok(None);
-        }
-        let actual_status = if active.cancel.is_cancelled() {
-            MessageStatus::Interrupted
+        let notes = if status == MessageStatus::Complete {
+            prepare_notes_locked(&mut state, message_id)
         } else {
-            status
+            Ok(None)
         };
-        let result = state
+        Ok(Some(FinishedTurn { status, notes }))
+    }
+
+    pub fn list_notes(&self) -> Result<Vec<UserNote>, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .list_notes()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn edit_note(&self, id: &str, content: &str, revision: i64) -> Result<UserNote, String> {
+        self.state()?
             .vault
             .as_mut()
-            .ok_or("The vault is locked.")?
-            .finish_assistant_message(message_id, actual_status)
-            .map(|_| ())
-            .map_err(|error| error.to_string());
-        state.active.take();
-        result.map(|_| Some(actual_status))
+            .ok_or("Unlock your vault first.")?
+            .edit_note(id, content, revision)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn delete_note(&self, id: &str, revision: i64) -> Result<(), String> {
+        self.state()?
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .delete_note(id, revision)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn prepare_notes(&self, message_id: &str) -> Result<Option<PreparedNotes>, String> {
+        let mut state = self.state()?;
+        prepare_notes_locked(&mut state, message_id)
+    }
+
+    pub fn finish_notes(
+        &self,
+        attempt_id: &str,
+        patch: Option<&NotePatch>,
+    ) -> Result<Option<NotesStatus>, String> {
+        let mut state = self.state()?;
+        let Some(active) = state.notes_active.as_ref() else {
+            return Ok(None);
+        };
+        if active.attempt_id != attempt_id {
+            return Ok(None);
+        }
+        let active = state.notes_active.take().expect("matching notes attempt");
+        let vault = state.vault.as_mut().ok_or("The vault is locked.")?;
+        if active.cancel.is_cancelled() || patch.is_none() {
+            vault
+                .fail_notes(&active.message_id)
+                .map_err(|error| error.to_string())?;
+            return Ok(Some(NotesStatus::Failed));
+        }
+        if let Err(error) = vault.apply_notes(&active.message_id, patch.expect("patch checked")) {
+            let _ = vault.fail_notes(&active.message_id);
+            return Err(error.to_string());
+        }
+        Ok(Some(NotesStatus::Complete))
     }
 
     pub fn cancel_turn(&self) -> Result<(), String> {
-        if let Some(active) = &self.state()?.active {
+        let state = self.state()?;
+        if let Some(active) = &state.active {
+            active.cancel.cancel();
+        }
+        if let Some(active) = &state.notes_active {
             active.cancel.cancel();
         }
         Ok(())
     }
 }
 
-fn recent_context(messages: Vec<Message>) -> Vec<Message> {
+fn finish_turn_locked(
+    state: &mut State,
+    message_id: &str,
+    status: MessageStatus,
+) -> Result<Option<MessageStatus>, String> {
+    let Some(active) = state.active.as_ref() else {
+        return Ok(None);
+    };
+    if active.message_id != message_id {
+        return Ok(None);
+    }
+    let actual_status = if active.cancel.is_cancelled() {
+        MessageStatus::Interrupted
+    } else {
+        status
+    };
+    let result = state
+        .vault
+        .as_mut()
+        .ok_or("The vault is locked.")?
+        .finish_assistant_message(message_id, actual_status)
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    state.active.take();
+    result.map(|_| Some(actual_status))
+}
+
+fn prepare_notes_locked(
+    state: &mut State,
+    message_id: &str,
+) -> Result<Option<PreparedNotes>, String> {
+    if state.active.is_some() || state.notes_active.is_some() {
+        return Err("Wait for the current operation to finish.".into());
+    }
+    let input = match state
+        .vault
+        .as_mut()
+        .ok_or("Unlock your vault first.")?
+        .begin_notes(message_id)
+    {
+        Ok(input) => input,
+        Err(crate::vault::VaultError::NotesAlreadyComplete) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    let cancel = CancellationToken::new();
+    state.notes_active = Some(ActiveNotes {
+        attempt_id: attempt_id.clone(),
+        message_id: message_id.into(),
+        cancel: cancel.clone(),
+    });
+    Ok(Some(PreparedNotes {
+        attempt_id,
+        input,
+        cancel,
+    }))
+}
+
+fn seed_demo(vault: &mut Vault) -> crate::vault::Result<()> {
+    if !vault.list_sessions()?.is_empty() {
+        return Ok(());
+    }
+    let samples = [
+        ("Making room for a slower week", "I turn rest into another task. I want to leave Sunday mornings free from planning.", "It sounds like planning has been taking up the space you wanted for rest. What would a free Sunday morning look like to you?", "Leave Sunday mornings free from planning.", "I want to leave Sunday mornings free from planning."),
+        ("A boundary worth keeping", "I keep checking work messages at dinner. I want to put my phone away when I sit down to eat.", "You have a specific boundary in mind. What usually draws you back to the phone during dinner?", "Put the phone away during dinner.", "I want to put my phone away when I sit down to eat."),
+        ("Finding time for a friend", "I miss talking to my friend Sam. I would like to ask Sam to go for a walk this weekend.", "A walk sounds like a way to make time together. What would you like to catch up on?", "Ask Sam about a walk this weekend.", "I would like to ask Sam to go for a walk this weekend."),
+    ];
+    for (title, user, assistant, note, quote) in samples {
+        let session = vault.create_session_with_title(title)?;
+        let (_, reply) = vault.begin_turn(&session.id, user)?;
+        vault.append_assistant_chunk(&reply.id, assistant)?;
+        vault.finish_assistant_message(&reply.id, MessageStatus::Complete)?;
+        vault.begin_notes(&reply.id)?;
+        let patch: NotePatch = serde_json::from_value(serde_json::json!({
+            "memories": [{"kind":"goal", "content":note, "evidenceQuote":quote}],
+            "notes": [{"kind":"next_step", "content":note, "evidenceQuote":quote}]
+        }))
+        .map_err(|_| crate::vault::VaultError::InvalidInput("invalid demo fixture"))?;
+        vault.apply_notes(&reply.id, &patch)?;
+    }
+    Ok(())
+}
+
+fn recent_context(messages: Vec<Message>, budget: usize) -> Vec<Message> {
     let mut bytes = 0;
     let mut recent = Vec::new();
     for message in messages.into_iter().rev() {
         if message.role == MessageRole::Assistant && message.status != MessageStatus::Complete {
             continue;
         }
-        if recent.len() >= 20 || bytes + message.content.len() > 6_000 {
+        if recent.len() >= 20 || bytes + message.content.len() > budget {
             break;
         }
         bytes += message.content.len();
@@ -268,6 +540,113 @@ mod tests {
     use super::*;
 
     const PASSPHRASE: &str = "a synthetic vault passphrase";
+
+    #[test]
+    fn demo_is_separate_and_never_unlocks_or_replaces_personal_vault() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        assert!(engine.open_demo(DEMO_ID, "wrong").is_err());
+        assert!(!Vault::exists(temp.path().join("vault")));
+        assert!(engine.open_demo(DEMO_ID, DEMO_PASSPHRASE).unwrap().is_demo);
+        assert_eq!(engine.list_sessions().unwrap().len(), 3);
+        assert_eq!(engine.list_notes().unwrap().len(), 3);
+        assert!(!Vault::exists(temp.path().join("vault")));
+        engine.lock().unwrap();
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let personal = engine.create_session().unwrap();
+        assert!(engine.open_demo(DEMO_ID, DEMO_PASSPHRASE).is_err());
+        engine.lock().unwrap();
+        assert!(engine.unlock(DEMO_PASSPHRASE, false).is_err());
+        engine.open_demo(DEMO_ID, DEMO_PASSPHRASE).unwrap();
+        assert_eq!(engine.list_sessions().unwrap().len(), 3);
+        assert!(engine.list_messages(&personal.id).is_err());
+        engine.lock().unwrap();
+        engine.unlock(PASSPHRASE, false).unwrap();
+        assert_eq!(engine.list_sessions().unwrap(), vec![personal]);
+    }
+
+    #[test]
+    fn locking_notes_prevents_an_old_attempt_committing_into_a_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let turn = engine
+            .prepare_turn(&session.id, "I want to take a walk.")
+            .unwrap();
+        engine
+            .append_chunk(&turn.assistant.id, "When would you like to go?")
+            .unwrap();
+        engine
+            .finish_turn(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap();
+        let old = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
+        assert!(engine.prepare_turn(&session.id, "Another message").is_err());
+        engine.lock().unwrap();
+        assert!(old.cancel.is_cancelled());
+        engine.unlock(PASSPHRASE, false).unwrap();
+        let new = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
+        let patch: NotePatch = serde_json::from_value(serde_json::json!({"memories":[],"notes":[{"kind":"next_step","content":"Take a walk.","evidenceQuote":"I want to take a walk."}]})).unwrap();
+        assert!(engine
+            .finish_notes(&old.attempt_id, Some(&patch))
+            .unwrap()
+            .is_none());
+        assert!(engine.list_notes().unwrap().is_empty());
+        assert!(matches!(
+            engine.finish_notes(&new.attempt_id, Some(&patch)).unwrap(),
+            Some(NotesStatus::Complete)
+        ));
+        let note = engine.list_notes().unwrap().remove(0);
+        engine
+            .edit_note(&note.id, "Take a short walk tomorrow.", note.revision)
+            .unwrap();
+        assert!(engine.delete_note(&note.id, note.revision).is_err());
+        assert!(engine.prepare_notes(&turn.assistant.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn completed_turn_reserves_notes_before_next_turn_or_cancel() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let turn = engine
+            .prepare_turn(&session.id, "I want to take a walk.")
+            .unwrap();
+        engine
+            .append_chunk(&turn.assistant.id, "When would you like to go?")
+            .unwrap();
+
+        let finished = engine
+            .finish_turn_and_prepare_notes(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished.status, MessageStatus::Complete);
+        let notes = finished
+            .notes
+            .expect("notes reservation should succeed")
+            .expect("completed turn should reserve notes");
+
+        assert!(engine
+            .prepare_turn(&session.id, "A second message")
+            .is_err());
+        engine.cancel_turn().unwrap();
+        assert!(notes.cancel.is_cancelled());
+        assert!(matches!(
+            engine.finish_notes(&notes.attempt_id, None).unwrap(),
+            Some(NotesStatus::Failed)
+        ));
+
+        let messages = engine.list_messages(&session.id).unwrap();
+        assert_eq!(messages[1].status, MessageStatus::Complete);
+        let next = engine
+            .prepare_turn(&session.id, "A second message")
+            .unwrap();
+        engine.cancel_turn().unwrap();
+        engine
+            .finish_turn(&next.assistant.id, MessageStatus::Interrupted)
+            .unwrap();
+    }
 
     #[test]
     fn locking_cancels_generation_and_rejects_late_writes() {

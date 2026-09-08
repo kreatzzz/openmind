@@ -11,12 +11,15 @@ import {
   Menu,
   Plus,
   Settings2,
+  Search,
+  Trash2,
   Square,
   X,
 } from "lucide-react";
 import { Dialog } from "./components/Dialog";
 import { Mark } from "./components/Mark";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { Notebook } from "./components/Notebook";
 import { Transcript } from "./components/Transcript";
 import {
   desktop,
@@ -25,6 +28,7 @@ import {
   type ModelInfo,
   type Session,
   type TurnEvent,
+  type UserNote,
 } from "./lib/desktop";
 
 type Screen = "loading" | "setup" | "locked" | "conversation" | "browser";
@@ -76,6 +80,26 @@ export default function App() {
     isDesktop ? "loading" : "browser",
   );
   const [sample, setSample] = useState(false);
+  const [isDemo, setIsDemo] = useState(false);
+  const [userNotes, setUserNotes] = useState<UserNote[]>([]);
+  const [noteStatus, setNoteStatus] = useState("");
+  const [search, setSearch] = useState("");
+  const [highlight, setHighlight] = useState<string | null>(null);
+  const [appearance, setAppearance] = useState(() => {
+    try {
+      return localStorage.getItem("openmind.appearance.v1") || "system";
+    } catch {
+      return "system";
+    }
+  });
+  useEffect(() => {
+    document.documentElement.dataset.theme = appearance;
+    try {
+      localStorage.setItem("openmind.appearance.v1", appearance);
+    } catch {
+      /* Appearance is optional. */
+    }
+  }, [appearance]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -89,6 +113,7 @@ export default function App() {
   const [settings, setSettings] = useState(false);
   const [notes, setNotes] = useState(false);
   const [drawer, setDrawer] = useState(false);
+  const [deleteConversation, setDeleteConversation] = useState(false);
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:11434");
   const [model, setModel] = useState("");
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -110,10 +135,14 @@ export default function App() {
 
   async function loadSessions() {
     const request = generation.current;
-    const list = await desktop.listSessions();
+    const [list, loadedNotes] = await Promise.all([
+      desktop.listSessions(),
+      desktop.listNotes(),
+    ]);
     const loaded = list[0] ? await desktop.listMessages(list[0].id) : [];
     if (request !== generation.current) return;
     setSessions(list);
+    setUserNotes(loadedNotes);
     setSelected(list[0]?.id ?? null);
     setMessages(loaded);
     setScreen("conversation");
@@ -125,6 +154,7 @@ export default function App() {
       .getVaultStatus()
       .then(async (status) => {
         if (ignore) return;
+        setIsDemo(status.isDemo);
         if (status.unlocked) await loadSessions();
         else setScreen(status.exists ? "locked" : "setup");
       })
@@ -172,9 +202,40 @@ export default function App() {
       setBusy(false);
     }
   }
-  function exploreSample() {
+  async function exploreSample() {
+    if (isDesktop) {
+      setBusy(true);
+      setError("");
+      try {
+        const status = await desktop.openDemo("demo", "openmind-demo-2026");
+        setIsDemo(status.isDemo);
+        await loadSessions();
+        void discoverModels();
+      } catch (reason) {
+        setError(errorText(reason));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     generation.current++;
     setSample(true);
+    setIsDemo(true);
+    setUserNotes([
+      {
+        id: "sample-note",
+        sessionId: "sample",
+        sourceMessageId: "sample-1",
+        kind: "takeaway",
+        content: "Rest can start to feel like another task to get right.",
+        evidenceQuote:
+          "I think I turned resting into another thing to get right.",
+        revision: 1,
+        edited: false,
+        createdAt: SAMPLE_SESSION.createdAt,
+        updatedAt: SAMPLE_SESSION.createdAt,
+      },
+    ]);
     setSessions([SAMPLE_SESSION]);
     setSelected("sample");
     setMessages(SAMPLE_MESSAGES);
@@ -184,14 +245,21 @@ export default function App() {
   function exitSample() {
     generation.current++;
     setSample(false);
+    setIsDemo(false);
+    setNotes(false);
+    setUserNotes([]);
+    setSearch("");
     setMessages([]);
     setSessions([]);
     setSelected(null);
     setDraft("");
     setDrawer(false);
+    setSettings(false);
+    setHighlight(null);
     setScreen(isDesktop ? "setup" : "browser");
   }
   async function selectSession(id: string) {
+    setNotes(false);
     if (sending || busy || id === selected) {
       setDrawer(false);
       return;
@@ -224,6 +292,7 @@ export default function App() {
       const item = await desktop.createSession();
       if (request !== generation.current) return;
       setSessions((current) => [item, ...current]);
+      setNotes(false);
       setSelected(item.id);
       setMessages([]);
       setDraft("");
@@ -256,6 +325,11 @@ export default function App() {
       activeTurn.current = false;
       stopRequested.current = false;
       setMessages([]);
+      setIsDemo(false);
+      setUserNotes([]);
+      setSearch("");
+      setNoteStatus("");
+      setHighlight(null);
       setSessions([]);
       setSelected(null);
       setDraft("");
@@ -269,6 +343,7 @@ export default function App() {
       setAnnouncement("Vault locked.");
       setSettings(false);
       setNotes(false);
+      setDeleteConversation(false);
       setDrawer(false);
       setSending(false);
       setNewReply(false);
@@ -280,6 +355,30 @@ export default function App() {
       locking.current = false;
       setBusy(false);
       setSending(false);
+    }
+  }
+  async function removeConversation() {
+    if (!selected || sending || busy || sample) return;
+    const request = ++generation.current;
+    const id = selected;
+    setBusy(true);
+    setError("");
+    try {
+      await desktop.deleteSession(id);
+      if (request !== generation.current) return;
+      setSessions((items) => items.filter((item) => item.id !== id));
+      setUserNotes((items) => items.filter((item) => item.sessionId !== id));
+      setSelected(null);
+      setMessages([]);
+      setDraft("");
+      setHighlight(null);
+      setNoteStatus("");
+      setDeleteConversation(false);
+      setAnnouncement("Conversation deleted.");
+    } catch (reason) {
+      if (request === generation.current) setError(errorText(reason));
+    } finally {
+      if (request === generation.current) setBusy(false);
     }
   }
   async function discoverModels() {
@@ -323,6 +422,7 @@ export default function App() {
     setSending(true);
     setError("");
     setAnnouncement("Preparing a reply");
+    setNoteStatus("");
     const content = draft.trim();
     const request = generation.current;
     let received = false;
@@ -387,6 +487,22 @@ export default function App() {
                 : "Reply stopped.",
             );
           }
+          if (event.type === "notes") {
+            if (event.status === "updating" && stopRequested.current) {
+              void desktop.cancelTurn().catch((reason) => {
+                if (generation.current === request) setError(errorText(reason));
+              });
+            }
+            const status =
+              event.status === "updating"
+                ? "Updating notes"
+                : event.status === "complete"
+                  ? "Notes updated"
+                  : event.message ||
+                    "Notes could not be updated. Your reply is saved.";
+            setNoteStatus(status);
+            setAnnouncement(status);
+          }
           if (event.type === "error") {
             setError(event.message);
             setAnnouncement("The reply could not be completed.");
@@ -401,8 +517,14 @@ export default function App() {
     } finally {
       if (generation.current === request) {
         try {
-          const updatedSessions = await desktop.listSessions();
-          if (generation.current === request) setSessions(updatedSessions);
+          const [updatedSessions, updatedNotes] = await Promise.all([
+            desktop.listSessions(),
+            desktop.listNotes(),
+          ]);
+          if (generation.current === request) {
+            setSessions(updatedSessions);
+            setUserNotes(updatedNotes);
+          }
         } catch {
           if (generation.current === request)
             setError(
@@ -424,6 +546,56 @@ export default function App() {
       }
     }
   }
+  async function updateNotes() {
+    const reply = [...messages]
+      .reverse()
+      .find(
+        (message) =>
+          message.role === "assistant" && message.status === "complete",
+      );
+    if (!reply || activeTurn.current || busy || sample) return;
+    if (!connected || !model) {
+      setSettings(true);
+      return;
+    }
+    const request = generation.current;
+    activeTurn.current = true;
+    stopRequested.current = false;
+    setSending(true);
+    setNoteStatus("Updating notes");
+    setError("");
+    try {
+      await desktop.retryNotes({
+        messageId: reply.id,
+        baseUrl,
+        model,
+        onEvent: (event) => {
+          if (request !== generation.current) return;
+          if (event.type === "notes") {
+            setNoteStatus(
+              event.status === "updating"
+                ? "Updating notes"
+                : event.status === "complete"
+                  ? "Notes updated"
+                  : event.message || "Notes could not be updated. Try again.",
+            );
+            if (stopRequested.current)
+              void desktop.cancelTurn().catch(() => {});
+          }
+          if (event.type === "error") setError(event.message);
+        },
+      });
+      const updated = await desktop.listNotes();
+      if (request === generation.current) setUserNotes(updated);
+    } catch (reason) {
+      if (request === generation.current) setNoteStatus(errorText(reason));
+    } finally {
+      if (request === generation.current) {
+        activeTurn.current = false;
+        setSending(false);
+      }
+    }
+  }
   async function stop() {
     stopRequested.current = true;
     const request = generation.current;
@@ -438,34 +610,51 @@ export default function App() {
     <>
       <div className="rail-brand">
         <Mark />
-        <span>openmind</span>
+        <span>Openmind</span>
       </div>
-      <div className="rail-topline">A little room to think.</div>
+      <div className="rail-topline">
+        {isDemo ? "Demo workspace" : "Personal workspace"}
+      </div>
       <button
         className="new-conversation"
         onClick={sample ? exitSample : newSession}
         disabled={sending || busy}
       >
         <Plus size={18} />
-        {sample ? "Leave sample" : "New conversation"}
+        {sample ? "Close demo" : "New conversation"}
       </button>
+      <div className="session-search">
+        <Search size={15} />
+        <input
+          aria-label="Search conversations"
+          placeholder="Search conversations"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+        />
+      </div>
       <div className="history-label">
         CONVERSATIONS <span>{String(sessions.length).padStart(2, "0")}</span>
       </div>
       <nav className="session-list" aria-label="Conversations">
         {sessions.length ? (
-          sessions.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => void selectSession(item.id)}
-              className={`session-item ${selected === item.id ? "selected" : ""}`}
-              aria-current={selected === item.id ? "page" : undefined}
-              disabled={sending || busy}
-            >
-              <span>{item.title}</span>
-              <small>{dateLabel(item.createdAt)}</small>
-            </button>
-          ))
+          sessions
+            .filter((item) =>
+              item.title.toLowerCase().includes(search.toLowerCase()),
+            )
+            .map((item) => (
+              <button
+                key={item.id}
+                onClick={() => void selectSession(item.id)}
+                className={`session-item ${selected === item.id && !notes ? "selected" : ""}`}
+                aria-current={
+                  selected === item.id && !notes ? "page" : undefined
+                }
+                disabled={sending || busy}
+              >
+                <span>{item.title}</span>
+                <small>{dateLabel(item.createdAt)}</small>
+              </button>
+            ))
         ) : (
           <p className="history-empty">
             Your conversations will
@@ -504,7 +693,12 @@ export default function App() {
           <Settings2 size={18} />
           Settings
         </button>
-        {!sample && (
+        {sample ? (
+          <button className="rail-action" onClick={exitSample}>
+            <LockKeyhole size={17} />
+            Close demo
+          </button>
+        ) : (
           <button
             className="rail-action"
             onClick={lock}
@@ -516,7 +710,7 @@ export default function App() {
         )}
         <div className="rail-footnote">
           <span className="status-dot" />
-          {sample ? "Synthetic sample" : "Stored on this device"}
+          {isDemo ? "Demo · synthetic data only" : "Stored on this device"}
         </div>
       </div>
     </>
@@ -540,155 +734,250 @@ export default function App() {
                 >
                   <Menu size={20} />
                 </button>
-                <span className="header-section">Conversation</span>
+                <span className="header-section">
+                  {notes ? "Your notes" : "Conversation"}
+                </span>
                 <span className="header-slash">/</span>
                 <span className="header-date">
                   {session ? dateLabel(session.createdAt) : "A fresh page"}
                 </span>
               </div>
-              <span className="preview-badge">Engineering preview</span>
+              <div className="header-actions">
+                <span className="preview-badge">Engineering preview</span>
+                {!notes && selected && !sample && (
+                  <button
+                    className="icon-button"
+                    aria-label="Delete conversation"
+                    onClick={() => {
+                      setError("");
+                      setDeleteConversation(true);
+                    }}
+                    disabled={sending || busy}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                )}
+              </div>
             </header>
-            {sample && (
+            {isDemo && (
               <div className="sample-banner">
-                <span>
-                  Sample conversation · Fictional text, no model connected
-                </span>
-                <button onClick={exitSample}>
-                  Exit sample <ArrowRight size={14} />
+                <span>Demo workspace · Synthetic data only</span>
+                <button onClick={sample ? exitSample : lock}>
+                  Close demo <ArrowRight size={14} />
                 </button>
               </div>
             )}
-            <Transcript
-              messages={messages}
-              session={session}
-              sample={sample}
-              fontSize={fontSize}
-              scroll={scroll}
-              onScroll={() => {
-                const el = scroll.current;
-                if (el) {
-                  atBottom.current =
-                    el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-                  if (atBottom.current) setNewReply(false);
-                }
-              }}
-            />
-            <div className="composer-region">
-              <div className="composer-column">
-                {newReply && (
-                  <button
-                    className="new-reply"
-                    onClick={() => {
-                      if (scroll.current)
-                        scroll.current.scrollTop = scroll.current.scrollHeight;
-                      atBottom.current = true;
-                      setNewReply(false);
-                    }}
-                  >
-                    New reply <ArrowDown size={14} />
-                  </button>
-                )}
-                {error && (
-                  <div className="inline-error" role="alert">
-                    <CircleAlert size={17} />
-                    <span>{error}</span>
-                    <button
-                      className="icon-button"
-                      aria-label="Dismiss error"
-                      onClick={() => setError("")}
-                    >
-                      <X size={15} />
-                    </button>
-                  </div>
-                )}
-                {sample ? (
-                  <div className="sample-composer">
-                    <span>
-                      This is a sample to explore the reading experience.
-                    </span>
-                    <button className="text-button" onClick={exitSample}>
-                      Back to setup <ArrowRight size={16} />
-                    </button>
-                  </div>
-                ) : (
-                  <form className="composer" onSubmit={send}>
-                    <label className="sr-only" htmlFor="message">
-                      Your message
-                    </label>
-                    <textarea
-                      ref={composer}
-                      id="message"
-                      rows={2}
-                      value={draft}
-                      onChange={(event) => setDraft(event.target.value)}
-                      placeholder="What's on your mind?"
-                      disabled={busy}
-                      onKeyDown={(event) => {
-                        if (
-                          event.key === "Enter" &&
-                          !event.nativeEvent.isComposing &&
-                          event.keyCode !== 229 &&
-                          (enterToSend
-                            ? !event.shiftKey
-                            : event.metaKey || event.ctrlKey)
-                        ) {
-                          event.preventDefault();
-                          void send();
-                        }
-                      }}
-                    />
-                    <div className="composer-toolbar">
-                      <span>
-                        {sending
-                          ? "Generating a reply"
-                          : enterToSend
-                            ? "Shift + Enter for a new line"
-                            : "Ctrl / ⌘ + Enter to send"}
-                      </span>
-                      {sending ? (
-                        <button
-                          className="send-button"
-                          type="button"
-                          aria-label="Stop reply"
-                          onClick={stop}
-                        >
-                          <Square size={16} fill="currentColor" />
-                        </button>
-                      ) : (
-                        <button
-                          className="send-button"
-                          type="submit"
-                          aria-label={
-                            connected
-                              ? "Send message"
-                              : "Set up model connection"
-                          }
-                          disabled={!draft.trim() || busy}
-                        >
-                          <ArrowUp size={20} />
-                        </button>
-                      )}
-                    </div>
-                  </form>
-                )}
-                <div className="composer-footnote">
-                  <span>
-                    {sample ? (
-                      "Nothing in this sample is saved."
-                    ) : connected ? (
-                      <>
-                        <span className="status-dot" /> Ollama on loopback
-                      </>
-                    ) : (
-                      <button onClick={() => setSettings(true)}>
-                        Connect a local model <ArrowRight size={12} />
+            {notes ? (
+              <Notebook
+                notes={userNotes}
+                sample={sample}
+                disabled={sending || busy}
+                onEdit={async (note, content) => {
+                  const request = generation.current;
+                  const updated = sample
+                    ? {
+                        ...note,
+                        content,
+                        edited: true,
+                        revision: note.revision + 1,
+                      }
+                    : await desktop.editNote(note.id, content, note.revision);
+                  if (request === generation.current)
+                    setUserNotes((items) =>
+                      items.map((item) =>
+                        item.id === updated.id ? updated : item,
+                      ),
+                    );
+                }}
+                onDelete={async (note) => {
+                  const request = generation.current;
+                  if (!sample) await desktop.deleteNote(note.id, note.revision);
+                  if (request === generation.current)
+                    setUserNotes((items) =>
+                      items.filter((item) => item.id !== note.id),
+                    );
+                }}
+                onSource={async (note) => {
+                  const request = generation.current;
+                  atBottom.current = false;
+                  setNewReply(false);
+                  if (note.sessionId !== selected) {
+                    setBusy(true);
+                    try {
+                      const loaded = await desktop.listMessages(note.sessionId);
+                      if (request !== generation.current) return;
+                      setSelected(note.sessionId);
+                      setMessages(loaded);
+                      setDraft("");
+                    } finally {
+                      if (request === generation.current) setBusy(false);
+                    }
+                  }
+                  if (request === generation.current) {
+                    setNotes(false);
+                    setHighlight(note.sourceMessageId);
+                  }
+                }}
+              />
+            ) : (
+              <>
+                <Transcript
+                  highlight={highlight}
+                  messages={messages}
+                  session={session}
+                  sample={sample}
+                  fontSize={fontSize}
+                  scroll={scroll}
+                  onScroll={() => {
+                    const el = scroll.current;
+                    if (el) {
+                      atBottom.current =
+                        el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+                      if (atBottom.current) setNewReply(false);
+                    }
+                  }}
+                />
+                <div className="composer-region">
+                  <div className="composer-column">
+                    {newReply && (
+                      <button
+                        className="new-reply"
+                        onClick={() => {
+                          if (scroll.current)
+                            scroll.current.scrollTop =
+                              scroll.current.scrollHeight;
+                          atBottom.current = true;
+                          setNewReply(false);
+                        }}
+                      >
+                        New reply <ArrowDown size={14} />
                       </button>
                     )}
-                  </span>
-                  <span>AI can make mistakes.</span>
+                    {error && (
+                      <div className="inline-error" role="alert">
+                        <CircleAlert size={17} />
+                        <span>{error}</span>
+                        <button
+                          className="icon-button"
+                          aria-label="Dismiss error"
+                          onClick={() => setError("")}
+                        >
+                          <X size={15} />
+                        </button>
+                      </div>
+                    )}
+                    {sample ? (
+                      <div className="sample-composer">
+                        <span>
+                          Explore the conversation, then edit a takeaway in Your
+                          notes.
+                        </span>
+                        <button className="text-button" onClick={exitSample}>
+                          Close demo <ArrowRight size={16} />
+                        </button>
+                      </div>
+                    ) : (
+                      <form className="composer" onSubmit={send}>
+                        <label className="sr-only" htmlFor="message">
+                          Your message
+                        </label>
+                        <textarea
+                          ref={composer}
+                          id="message"
+                          rows={2}
+                          value={draft}
+                          onChange={(event) => setDraft(event.target.value)}
+                          placeholder="What's on your mind?"
+                          disabled={busy}
+                          onKeyDown={(event) => {
+                            if (
+                              event.key === "Enter" &&
+                              !event.nativeEvent.isComposing &&
+                              event.keyCode !== 229 &&
+                              (enterToSend
+                                ? !event.shiftKey
+                                : event.metaKey || event.ctrlKey)
+                            ) {
+                              event.preventDefault();
+                              void send();
+                            }
+                          }}
+                        />
+                        <div className="composer-toolbar">
+                          <span>
+                            {sending
+                              ? noteStatus === "Updating notes"
+                                ? "Updating notes"
+                                : "Generating a reply"
+                              : enterToSend
+                                ? "Shift + Enter for a new line"
+                                : "Ctrl / ⌘ + Enter to send"}
+                          </span>
+                          {sending ? (
+                            <button
+                              className="send-button"
+                              type="button"
+                              aria-label="Stop reply"
+                              onClick={stop}
+                            >
+                              <Square size={16} fill="currentColor" />
+                            </button>
+                          ) : (
+                            <button
+                              className="send-button"
+                              type="submit"
+                              aria-label={
+                                connected
+                                  ? "Send message"
+                                  : "Set up model connection"
+                              }
+                              disabled={!draft.trim() || busy}
+                            >
+                              <ArrowUp size={20} />
+                            </button>
+                          )}
+                        </div>
+                      </form>
+                    )}
+                    <div className="notes-update-row">
+                      {noteStatus && (
+                        <p className="note-status">{noteStatus}</p>
+                      )}
+                      {!sample &&
+                        messages.some(
+                          (message) =>
+                            message.role === "assistant" &&
+                            message.status === "complete",
+                        ) && (
+                          <button
+                            className="text-button"
+                            onClick={updateNotes}
+                            disabled={sending || busy}
+                          >
+                            Update notes
+                          </button>
+                        )}
+                    </div>
+                    <div className="composer-footnote">
+                      <span>
+                        {sample ? (
+                          "Browser demo · No inference or storage"
+                        ) : connected ? (
+                          <>
+                            <span className="status-dot" /> Ollama on loopback
+                          </>
+                        ) : (
+                          <button onClick={() => setSettings(true)}>
+                            Connect a local model <ArrowRight size={12} />
+                          </button>
+                        )}
+                      </span>
+                      <span>AI can make mistakes.</span>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
+              </>
+            )}
           </main>
           {drawer && (
             <Dialog title="Openmind" onClose={() => setDrawer(false)}>
@@ -709,11 +998,43 @@ export default function App() {
           onUnlock={unlock}
         />
       )}
-      {settings && (
+      {deleteConversation && (
         <Dialog
-          title="Make yourself comfortable"
-          onClose={() => setSettings(false)}
+          title="Delete conversation?"
+          onClose={() => {
+            if (!busy) setDeleteConversation(false);
+          }}
         >
+          <p className="deletion-description">
+            This removes the transcript and its generated notes and internal
+            memory from this vault. This cannot be undone.
+          </p>
+          {error && (
+            <p className="inline-error" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="note-actions">
+            <button
+              className="secondary-button"
+              disabled={busy}
+              autoFocus
+              onClick={() => setDeleteConversation(false)}
+            >
+              Keep conversation
+            </button>
+            <button
+              className="primary-button"
+              disabled={busy || sending}
+              onClick={removeConversation}
+            >
+              {busy ? "Deleting…" : "Delete conversation"}
+            </button>
+          </div>
+        </Dialog>
+      )}
+      {settings && (
+        <Dialog title="Settings" onClose={() => setSettings(false)}>
           <div className="settings-section">
             <div className="eyebrow">MODEL CONNECTION</div>
             <h3>Ollama on loopback</h3>
@@ -786,7 +1107,18 @@ export default function App() {
             )}
           </div>
           <div className="settings-section">
-            <div className="eyebrow">READING & WRITING</div>
+            <div className="eyebrow">APPEARANCE</div>
+            <label htmlFor="appearance">Theme</label>
+            <select
+              id="appearance"
+              value={appearance}
+              onChange={(event) => setAppearance(event.target.value)}
+            >
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+            <div className="eyebrow reading-heading">READING & WRITING</div>
             <label htmlFor="text-size" className="setting-row">
               Conversation text <span>{fontSize}px</span>
             </label>
@@ -811,7 +1143,8 @@ export default function App() {
             </p>
           </div>
           <p className="settings-footnote">
-            These preferences last until you close the app.
+            Theme is saved on this device. Reading preferences last until you
+            close the app.
           </p>
           <button
             className="primary-button wide"
@@ -819,18 +1152,6 @@ export default function App() {
           >
             Done
           </button>
-        </Dialog>
-      )}
-      {notes && (
-        <Dialog title="Your notes" onClose={() => setNotes(false)}>
-          <div className="notes-empty">
-            <BookOpen size={30} strokeWidth={1.25} />
-            <h3>A place to return to.</h3>
-            <p>Notes are not generated in this prototype.</p>
-            <p className="field-hint">
-              Future notes will link back to the conversation they came from.
-            </p>
-          </div>
         </Dialog>
       )}
     </div>

@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
   "description": "Only the main local window can use the prototype's narrow vault and conversation commands.",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "allow-get-vault-status",
     "allow-create-vault",
@@ -13,6 +15,12 @@
     "allow-list-messages",
     "allow-list-models",
     "allow-send-message",
-    "allow-cancel-turn"
+    "allow-cancel-turn",
+    "allow-open-demo",
+    "allow-list-notes",
+    "allow-edit-note",
+    "allow-delete-note",
+    "allow-retry-notes",
+    "allow-delete-session"
   ]
 }

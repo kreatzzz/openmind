@@ -4,13 +4,17 @@ A desktop app in development for private, ongoing conversations about life, with
 
 **Status: desktop engineering preview. Not evaluated clinical care.**
 
-The first implementation includes an encrypted local conversation vault, a streamed Ollama connection, session history, and a responsive conversation interface. Internal memory and generated user notes are still planned. See [prototype capabilities, limitations, and setup](docs/prototype.md).
+The current implementation includes a Geist-inspired desktop UI, a separate one-click demo, an encrypted conversation vault, Ollama streaming, and source-linked editable notes. A structured follow-up call saves user notes and internal memory together. Relationship mapping and the full clinical workflow remain in development. See [prototype capabilities, limitations, and setup](docs/prototype.md).
 
 Openmind is intended to connect life events, people, recurring concerns, and goals in an encrypted memory graph. Users can start a conversation whenever they want or set a reminder for a planned session. Local inference is the default; connecting a remote API is an explicit choice.
 
 The intended product is a clinical therapy app. Target conditions, clinical delivery model, launch jurisdiction, and evidence requirements still need definition. No clinical effectiveness or therapist-equivalence claim has been established.
 
 Each submitted message should lead to a streamed text reply, an update to encrypted internal memory, and an update to separate user-facing notes. The proposed launch input is typing plus local speech-to-text, pending clarification. Text-to-speech output, with a provider such as ElevenLabs, comes later.
+
+## Try the demo
+
+Run `bun run tauri dev` and choose **Open demo**. The public test login is `demo`, with password `openmind-demo-2026`; the button enters them automatically. The demo uses a separate vault containing fictional conversations. No personal account setup is required. See [Linux launch troubleshooting](docs/prototype.md#linux-startup-troubleshooting) if the desktop window fails to open.
 
 ## Start here
 
