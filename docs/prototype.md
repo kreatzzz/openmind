@@ -61,6 +61,24 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features live_ -- -
 
 This verifies the protocol using a synthetic prompt. It does not assess therapeutic behavior.
 
+## Linux startup troubleshooting
+
+On Arch, install the runtime dependencies through the package manager:
+
+```sh
+sudo pacman -S --needed webkit2gtk-4.1 cmake ollama
+```
+
+The previous user-cache extraction was sufficient to compile, but failed at startup because the packaged WebKit library launches helper executables from `/usr/lib/webkit2gtk-4.1`. A library search path alone does not relocate those helpers. Use the system installation for running the app.
+
+If startup reports a Wayland protocol error or `Failed to create GBM buffer`, try the app with WebKit's DMA-BUF renderer disabled:
+
+```sh
+WEBKIT_DISABLE_DMABUF_RENDERER=1 bun run tauri dev
+```
+
+This was verified on the development machine on September 8, 2026: the native Wayland window opened and rendered the vault setup screen. The setting applies only to this invocation. It does not change compositor configuration or disable the WebKit sandbox. No X11 override was needed with this setting.
+
 ## Verification recorded September 7, 2026
 
 The Linux native build, 24 core regression tests, four UI lifecycle tests, and a real Ollama stream using `qwen3:0.6b` passed. `gemma3:270m` returned empty completions under the same prompt in this environment; empty or whitespace-only replies now end as interrupted provider failures. The model fixture establishes protocol operation only. macOS CI passed; Windows CI is tracked in the pull request.
