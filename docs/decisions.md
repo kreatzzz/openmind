@@ -1,6 +1,6 @@
 # Decisions and questions
 
-Planning began September 6, 2026; requirements updated September 7, 2026. A desktop engineering preview now exercises the shell, encrypted vault, and Ollama streaming. See [prototype status](prototype.md) for the implemented subset and its limitations.
+Planning began September 6, 2026; requirements updated September 8, 2026. A desktop engineering preview now exercises the shell, encrypted vault, and Ollama streaming. See [prototype status](prototype.md) for the implemented subset and its limitations.
 
 ## Confirmed requirements
 
@@ -13,9 +13,12 @@ Planning began September 6, 2026; requirements updated September 7, 2026. A desk
 - Planned sessions and conversations started at any time.
 - A polished interface based on Vercel's Geist design system, confirmed September 8.
 - One-click demo access with public test credentials and an isolated synthetic-data vault.
+- A bridge to the developer's OpenAI subscription for testing, requested September 8. The implementation uses the existing ChatGPT sign-in through Codex, subject to verification.
 - Clinical therapy is the intended product scope. Specific indications and clinical delivery model remain open.
 - Streamed text responses from the model at launch; text-to-speech output comes later, with ElevenLabs as an example provider.
 - Three results from submitted input: updated encrypted internal notes, a response, and updated notes for the user. Execution order and optimization are delegated to architecture design.
+
+The subscription testing adapter is limited to the native demo workspace with explicit remote-data consent. General remote-provider support for personal vaults remains separate work. See [Codex testing](codex-testing.md).
 
 ## Proposed decisions
 

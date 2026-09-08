@@ -19,6 +19,10 @@ The first implementation is a single-user desktop foundation. It is not an evalu
 
 The browser view offers a clearly labeled synthetic sample. Native vault and inference operations require the desktop shell. Connection and reading preferences currently last only for the open app instance. Only the appearance preference is saved in webview local storage.
 
+## Subscription bridge checkpoint
+
+An experimental ChatGPT subscription adapter using Codex App Server is checked in for the native demo, with explicit remote consent enforced in Rust. CLI sign-in and model discovery were probed; live adapter generation and native integration still need verification. See [the checkpoint and next steps](codex-testing.md).
+
 ## Not implemented
 
 Entity reconciliation and explicit relationships between memory nodes, semantic retrieval, internal-memory correction controls, summaries, transcript editing, remote APIs, speech input/output, reminders, keychain convenience unlock, OS lock/suspend handling, automatic idle lock, encrypted backup/export, and signed updates are future work.
@@ -100,6 +104,6 @@ This was verified on the development machine on September 8, 2026: the native Wa
 
 ## Verification recorded September 8, 2026
 
-The production frontend build, eight UI tests, 40 core regression tests, Clippy with warnings denied, formatting, and native Linux compilation pass. Two opt-in live Ollama tests pass using `qwen3:0.6b`, covering streaming and structured notes extraction. Native keyboard testing opened the separate demo, sent a fictional message, displayed the saved reply, and completed the notes update. Browser checks covered the notebook editor, dark appearance, and narrow layouts without page errors or horizontal overflow.
+The production frontend build, 11 UI tests, 44 core regression tests, Clippy with warnings denied, formatting, and native Linux compilation pass. Two opt-in live Ollama tests pass using `qwen3:0.6b`, covering streaming and structured notes extraction. Native keyboard testing opened the separate demo, sent a fictional message, displayed the saved reply, and completed the notes update. Browser checks covered the notebook editor, dark appearance, and narrow layouts without page errors or horizontal overflow.
 
-The small Ollama fixture establishes protocol operation only. Its responses have not passed the proposed conversation-policy evaluations and must not be treated as clinical guidance. macOS and Windows CI passed the preceding desktop foundation revision; the pull request tracks checks for subsequent changes. Signed installers remain unverified.
+The small Ollama fixture establishes protocol operation only. Its responses have not passed the proposed conversation-policy evaluations and must not be treated as clinical guidance. macOS CI passed the Geist/demo revision. Windows exposed an HTTP fixture that closed without draining POST bodies; that fixture is corrected in this checkpoint and awaits a CI rerun. The pull request tracks subsequent checks. Signed installers remain unverified.

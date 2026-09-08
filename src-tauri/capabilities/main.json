@@ -14,6 +14,7 @@
     "allow-create-session",
     "allow-list-messages",
     "allow-list-models",
+    "allow-list-codex-models",
     "allow-send-message",
     "allow-cancel-turn",
     "allow-open-demo",

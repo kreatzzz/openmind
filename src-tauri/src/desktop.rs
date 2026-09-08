@@ -7,13 +7,21 @@ use tauri::{ipc::Channel, Manager, State};
 use zeroize::Zeroizing;
 
 use crate::{
-    engine::{Engine, NotesStatus, PreparedNotes, TurnEvent, VaultStatus},
+    codex,
+    engine::{Engine, NotesStatus, PreparedNotes, ProviderKind, TurnEvent, VaultStatus},
     models::{Message, MessageRole, MessageStatus, Session},
     notes::UserNote,
     provider::{self, ChatMessage, ModelInfo, ProviderError},
 };
 
 struct DesktopState(Arc<Engine>);
+
+struct Connection {
+    provider: ProviderKind,
+    base_url: String,
+    model: String,
+    remote_consent: bool,
+}
 
 async fn blocking<T: Send + 'static>(
     state: &State<'_, DesktopState>,
@@ -76,11 +84,14 @@ async fn delete_note(
 async fn update_notes(
     engine: Arc<Engine>,
     message_id: String,
-    base_url: &str,
-    model: &str,
+    connection: &Connection,
     on_event: &Channel<TurnEvent>,
 ) -> Result<(), String> {
-    let prepared = match engine.prepare_notes(&message_id) {
+    let prepared = match engine.prepare_notes_with_provider(
+        &message_id,
+        connection.provider,
+        connection.remote_consent,
+    ) {
         Ok(Some(prepared)) => prepared,
         Ok(None) => {
             let _ = on_event.send(TurnEvent::Notes {
@@ -99,15 +110,14 @@ async fn update_notes(
             return Err(error);
         }
     };
-    execute_notes(engine, message_id, prepared, base_url, model, on_event).await
+    execute_notes(engine, message_id, prepared, connection, on_event).await
 }
 
 async fn execute_notes(
     engine: Arc<Engine>,
     message_id: String,
     prepared: PreparedNotes,
-    base_url: &str,
-    model: &str,
+    connection: &Connection,
     on_event: &Channel<TurnEvent>,
 ) -> Result<(), String> {
     if on_event
@@ -121,13 +131,25 @@ async fn execute_notes(
         engine.finish_notes(&prepared.attempt_id, None)?;
         return Err("The notebook window disconnected.".into());
     }
-    let result = provider::extract_notes(
-        base_url,
-        model,
-        &prepared.input.user.content,
-        prepared.cancel.clone(),
-    )
-    .await;
+    let result = match connection.provider {
+        ProviderKind::Ollama => {
+            provider::extract_notes(
+                &connection.base_url,
+                &connection.model,
+                &prepared.input.user.content,
+                prepared.cancel.clone(),
+            )
+            .await
+        }
+        ProviderKind::Codex => {
+            codex::extract_notes(
+                &connection.model,
+                &prepared.input.user.content,
+                prepared.cancel.clone(),
+            )
+            .await
+        }
+    };
     let message = result.as_ref().err().map(|error| error.to_string());
     match engine.finish_notes(&prepared.attempt_id, result.as_ref().ok()) {
         Ok(Some(status)) => {
@@ -160,13 +182,19 @@ async fn retry_notes(
     message_id: String,
     base_url: String,
     model: String,
+    provider: ProviderKind,
+    remote_consent: bool,
     on_event: Channel<TurnEvent>,
 ) -> Result<(), String> {
     update_notes(
         Arc::clone(&state.0),
         message_id,
-        &base_url,
-        &model,
+        &Connection {
+            provider,
+            base_url,
+            model,
+            remote_consent,
+        },
         &on_event,
     )
     .await
@@ -226,6 +254,16 @@ async fn list_models(
 }
 
 #[tauri::command]
+async fn list_codex_models(state: State<'_, DesktopState>) -> Result<Vec<ModelInfo>, String> {
+    state.0.require_demo()?;
+    let models = codex::list_models()
+        .await
+        .map_err(|error| error.to_string())?;
+    state.0.require_demo()?;
+    Ok(models)
+}
+
+#[tauri::command]
 async fn cancel_turn(state: State<'_, DesktopState>) -> Result<(), String> {
     state.0.cancel_turn()
 }
@@ -237,14 +275,22 @@ async fn send_message(
     content: String,
     base_url: String,
     model: String,
+    provider: ProviderKind,
+    remote_consent: bool,
     on_event: Channel<TurnEvent>,
 ) -> Result<(), String> {
     if model.trim().is_empty() || model.len() > 256 {
-        return Err("Select an available local model before sending.".into());
+        return Err("Select an available model before sending.".into());
     }
+    let connection = Connection {
+        provider,
+        base_url,
+        model,
+        remote_consent,
+    };
     let engine = Arc::clone(&state.0);
     let prepared = blocking(&state, move |engine| {
-        engine.prepare_turn(&session_id, &content)
+        engine.prepare_turn_with_provider(&session_id, &content, provider, remote_consent)
     })
     .await?;
     let message_id = prepared.assistant.id.clone();
@@ -299,26 +345,38 @@ async fn send_message(
             })
             .map_err(|_| ProviderError::CallbackFailed)
     };
-    let mut result = provider::generate(
-        &base_url,
-        &model,
-        history,
-        prepared.cancel.clone(),
-        |chunk| {
-            // The provider also reports failures through its return value.
-            // Only content enters the transcript or UI channel here.
-            let Ok(content) = chunk else {
-                return Ok(());
-            };
-            pending.push_str(&content);
-            if pending.len() >= 128 || flushed_at.elapsed() >= Duration::from_millis(60) {
-                flush(&mut pending)?;
-                flushed_at = Instant::now();
-            }
-            Ok(())
-        },
-    )
-    .await;
+    let on_chunk = |chunk: provider::Chunk| {
+        let Ok(content) = chunk else {
+            return Ok(());
+        };
+        pending.push_str(&content);
+        if pending.len() >= 128 || flushed_at.elapsed() >= Duration::from_millis(60) {
+            flush(&mut pending)?;
+            flushed_at = Instant::now();
+        }
+        Ok(())
+    };
+    let mut result = match connection.provider {
+        ProviderKind::Ollama => {
+            provider::generate(
+                &connection.base_url,
+                &connection.model,
+                history,
+                prepared.cancel.clone(),
+                on_chunk,
+            )
+            .await
+        }
+        ProviderKind::Codex => {
+            codex::generate(
+                &connection.model,
+                history,
+                prepared.cancel.clone(),
+                on_chunk,
+            )
+            .await
+        }
+    };
     if result.is_ok() {
         result = flush(&mut pending);
     }
@@ -342,8 +400,7 @@ async fn send_message(
                         Arc::clone(&engine),
                         message_id.clone(),
                         prepared,
-                        &base_url,
-                        &model,
+                        &connection,
                         &on_event,
                     )
                     .await;
@@ -397,6 +454,7 @@ pub fn run() {
             delete_session,
             list_messages,
             list_models,
+            list_codex_models,
             send_message,
             cancel_turn,
         ])

@@ -16,6 +16,7 @@ fn main() {
             "delete_session",
             "list_messages",
             "list_models",
+            "list_codex_models",
             "send_message",
             "cancel_turn",
         ]),

@@ -1,3 +1,4 @@
+pub mod codex;
 pub mod engine;
 pub mod models;
 pub mod notes;

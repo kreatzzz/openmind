@@ -42,3 +42,5 @@ Planning began on September 6, 2026; the desktop foundation followed on Septembe
 Open-source distribution does not settle the legal obligations of a clinical app. See the [legal considerations](docs/legal-considerations.md).
 
 Use only synthetic conversations in public issues, examples, and tests. The software license has not been selected yet; public visibility should not be read as a chosen open-source license.
+
+The experimental [ChatGPT subscription testing bridge](docs/codex-testing.md) is checked in as a work-in-progress checkpoint. Live adapter verification remains pending.

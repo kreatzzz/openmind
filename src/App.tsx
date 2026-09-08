@@ -115,6 +115,8 @@ export default function App() {
   const [drawer, setDrawer] = useState(false);
   const [deleteConversation, setDeleteConversation] = useState(false);
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:11434");
+  const [provider, setProvider] = useState<"ollama" | "codex">("ollama");
+  const [remoteConsent, setRemoteConsent] = useState(false);
   const [model, setModel] = useState("");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [connectionError, setConnectionError] = useState("");
@@ -244,6 +246,7 @@ export default function App() {
   }
   function exitSample() {
     generation.current++;
+    changeProvider("ollama");
     setSample(false);
     setIsDemo(false);
     setNotes(false);
@@ -337,6 +340,8 @@ export default function App() {
       setConfirmation("");
       setError("");
       setConnectionError("");
+      setProvider("ollama");
+      setRemoteConsent(false);
       setConnected(false);
       setModels([]);
       setModel("");
@@ -381,13 +386,26 @@ export default function App() {
       if (request === generation.current) setBusy(false);
     }
   }
+  function changeProvider(next: "ollama" | "codex") {
+    connectionGeneration.current++;
+    setProvider(next);
+    setRemoteConsent(false);
+    setModels([]);
+    setModel("");
+    setConnected(false);
+    setDiscovering(false);
+    setConnectionError("");
+  }
   async function discoverModels() {
     const request = ++connectionGeneration.current;
     setDiscovering(true);
     setConnectionError("");
     setConnected(false);
     try {
-      const result = await desktop.listModels(baseUrl);
+      const result =
+        provider === "codex"
+          ? await desktop.listCodexModels()
+          : await desktop.listModels(baseUrl);
       if (request !== connectionGeneration.current) return;
       setModels(result);
       setModel((current) =>
@@ -398,7 +416,9 @@ export default function App() {
       setConnected(result.length > 0);
       if (!result.length)
         setConnectionError(
-          "Ollama is reachable, but no models are installed. Install a model in Ollama, then check again.",
+          provider === "codex"
+            ? "No Codex models are available. Check your ChatGPT access in Codex and try again."
+            : "Ollama is reachable, but no models are installed. Install a model in Ollama, then check again.",
         );
     } catch (reason) {
       if (request === connectionGeneration.current) {
@@ -413,7 +433,11 @@ export default function App() {
   async function send(event?: FormEvent) {
     event?.preventDefault();
     if (!draft.trim() || activeTurn.current || busy || sample) return;
-    if (!connected || !model) {
+    if (
+      !connected ||
+      !model ||
+      (provider === "codex" && (!isDemo || !remoteConsent))
+    ) {
       setSettings(true);
       return;
     }
@@ -450,6 +474,8 @@ export default function App() {
         content,
         baseUrl,
         model,
+        provider,
+        remoteConsent,
         onEvent: (event: TurnEvent) => {
           if (generation.current !== request) return;
           if (event.type === "message") {
@@ -554,7 +580,11 @@ export default function App() {
           message.role === "assistant" && message.status === "complete",
       );
     if (!reply || activeTurn.current || busy || sample) return;
-    if (!connected || !model) {
+    if (
+      !connected ||
+      !model ||
+      (provider === "codex" && (!isDemo || !remoteConsent))
+    ) {
       setSettings(true);
       return;
     }
@@ -569,6 +599,8 @@ export default function App() {
         messageId: reply.id,
         baseUrl,
         model,
+        provider,
+        remoteConsent,
         onEvent: (event) => {
           if (request !== generation.current) return;
           if (event.type === "notes") {
@@ -927,7 +959,8 @@ export default function App() {
                               className="send-button"
                               type="submit"
                               aria-label={
-                                connected
+                                connected &&
+                                (provider !== "codex" || remoteConsent)
                                   ? "Send message"
                                   : "Set up model connection"
                               }
@@ -964,11 +997,17 @@ export default function App() {
                           "Browser demo · No inference or storage"
                         ) : connected ? (
                           <>
-                            <span className="status-dot" /> Ollama on loopback
+                            <span className="status-dot" />{" "}
+                            {provider === "codex"
+                              ? "Online · ChatGPT via Codex"
+                              : "Ollama on loopback"}
                           </>
                         ) : (
                           <button onClick={() => setSettings(true)}>
-                            Connect a local model <ArrowRight size={12} />
+                            {provider === "codex"
+                              ? "Set up ChatGPT connection"
+                              : "Connect a local model"}{" "}
+                            <ArrowRight size={12} />
                           </button>
                         )}
                       </span>
@@ -1037,28 +1076,76 @@ export default function App() {
         <Dialog title="Settings" onClose={() => setSettings(false)}>
           <div className="settings-section">
             <div className="eyebrow">MODEL CONNECTION</div>
-            <h3>Ollama on loopback</h3>
-            <p>Model execution location unverified.</p>
-            <p>
-              Messages are sent to the configured Ollama endpoint. Only loopback
-              addresses are supported in this prototype. Ollama may have its own
-              logging and network settings.
-            </p>
-            <label htmlFor="endpoint">Local endpoint</label>
-            <input
-              id="endpoint"
-              value={baseUrl}
-              disabled={sample || discovering}
-              onChange={(event) => {
-                connectionGeneration.current++;
-                setBaseUrl(event.target.value);
-                setConnected(false);
-                setModels([]);
-                setModel("");
-                setConnectionError("");
-              }}
-              spellCheck={false}
-            />
+            <label htmlFor="provider">Provider</label>
+            <select
+              id="provider"
+              value={provider}
+              disabled={sample || sending}
+              onChange={(event) =>
+                changeProvider(
+                  event.target.value === "codex" && isDemo && !sample
+                    ? "codex"
+                    : "ollama",
+                )
+              }
+            >
+              <option value="ollama">Local Ollama</option>
+              {isDemo && !sample && (
+                <option value="codex">ChatGPT via Codex</option>
+              )}
+            </select>
+            {provider === "codex" ? (
+              <>
+                <h3>ChatGPT via Codex · Online</h3>
+                <p>
+                  Uses the ChatGPT account signed in to Codex on this device.
+                  Subscription limits apply. Available for synthetic demo
+                  testing only.
+                </p>
+                <p>
+                  This sends demo messages, recent conversation context,
+                  internal memory, and the source for note updates to OpenAI.
+                </p>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={remoteConsent}
+                    disabled={sending}
+                    onChange={(event) => setRemoteConsent(event.target.checked)}
+                  />
+                  I agree to send this demo context to OpenAI.
+                </label>
+                <p className="field-hint">
+                  If signed out, run <code>codex login</code> in a terminal,
+                  then check the connection.
+                </p>
+              </>
+            ) : (
+              <>
+                <h3>Ollama on loopback</h3>
+                <p>Model execution location unverified.</p>
+                <p>
+                  Messages are sent to the configured Ollama endpoint. Only
+                  loopback addresses are supported in this prototype. Ollama may
+                  have its own logging and network settings.
+                </p>
+                <label htmlFor="endpoint">Local endpoint</label>
+                <input
+                  id="endpoint"
+                  value={baseUrl}
+                  disabled={sample || discovering}
+                  onChange={(event) => {
+                    connectionGeneration.current++;
+                    setBaseUrl(event.target.value);
+                    setConnected(false);
+                    setModels([]);
+                    setModel("");
+                    setConnectionError("");
+                  }}
+                  spellCheck={false}
+                />
+              </>
+            )}
             <button
               className="secondary-button"
               onClick={discoverModels}
@@ -1101,7 +1188,10 @@ export default function App() {
                   ))}
                 </select>
                 <div className="connection-success">
-                  <Check size={15} /> Ollama is ready
+                  <Check size={15} />{" "}
+                  {provider === "codex"
+                    ? "ChatGPT via Codex is ready"
+                    : "Ollama is ready"}
                 </div>
               </>
             )}

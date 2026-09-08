@@ -16,6 +16,8 @@ export interface Message {
   createdAt: string;
 }
 
+export type ProviderKind = "ollama" | "codex";
+
 export interface ModelInfo {
   name: string;
   size: number;
@@ -87,11 +89,15 @@ export const desktop = {
     messageId,
     baseUrl,
     model,
+    provider,
+    remoteConsent,
     onEvent,
   }: {
     messageId: string;
     baseUrl: string;
     model: string;
+    provider: ProviderKind;
+    remoteConsent: boolean;
     onEvent: (event: TurnEvent) => void;
   }): Promise<void> {
     const channel = new Channel<TurnEvent>();
@@ -101,6 +107,8 @@ export const desktop = {
         messageId,
         baseUrl,
         model,
+        provider,
+        remoteConsent,
         onEvent: channel,
       });
     } finally {
@@ -119,18 +127,23 @@ export const desktop = {
     native<Message[]>("list_messages", { sessionId }),
   listModels: (baseUrl: string) =>
     native<ModelInfo[]>("list_models", { baseUrl }),
+  listCodexModels: () => native<ModelInfo[]>("list_codex_models"),
   cancelTurn: () => native<void>("cancel_turn"),
   async sendMessage({
     sessionId,
     content,
     baseUrl,
     model,
+    provider,
+    remoteConsent,
     onEvent,
   }: {
     sessionId: string;
     content: string;
     baseUrl: string;
     model: string;
+    provider: ProviderKind;
+    remoteConsent: boolean;
     onEvent: (event: TurnEvent) => void;
   }): Promise<void> {
     const channel = new Channel<TurnEvent>();
@@ -141,6 +154,8 @@ export const desktop = {
         content,
         baseUrl,
         model,
+        provider,
+        remoteConsent,
         onEvent: channel,
       });
     } finally {

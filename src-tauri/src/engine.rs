@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -8,6 +8,19 @@ use crate::{
     notes::{NotePatch, NotesInput, UserNote},
     vault::Vault,
 };
+
+const CODEX_DEMO_ONLY_ERROR: &str = "ChatGPT via Codex is available only in the demo vault.";
+const CODEX_CONSENT_REQUIRED_ERROR: &str =
+    "Confirm remote processing consent before using ChatGPT via Codex.";
+const DEMO_REQUIRED_ERROR: &str = "Open the demo vault before using ChatGPT via Codex.";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    #[default]
+    Ollama,
+    Codex,
+}
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -230,6 +243,17 @@ impl Engine {
         Ok(())
     }
 
+    pub fn require_demo(&self) -> Result<(), String> {
+        let state = self.state()?;
+        if !state.is_demo {
+            return Err(DEMO_REQUIRED_ERROR.into());
+        }
+        if state.vault.is_none() {
+            return Err(DEMO_REQUIRED_ERROR.into());
+        }
+        Ok(())
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<Session>, String> {
         self.state()?
             .vault
@@ -271,10 +295,21 @@ impl Engine {
     }
 
     pub fn prepare_turn(&self, session_id: &str, content: &str) -> Result<PreparedTurn, String> {
+        self.prepare_turn_with_provider(session_id, content, ProviderKind::Ollama, false)
+    }
+
+    pub fn prepare_turn_with_provider(
+        &self,
+        session_id: &str,
+        content: &str,
+        provider: ProviderKind,
+        remote_consent: bool,
+    ) -> Result<PreparedTurn, String> {
+        let mut state = self.state()?;
+        authorize_provider(&state, provider, remote_consent)?;
         if content.trim().is_empty() || content.len() > 6_000 {
             return Err("Write a message of up to 6,000 UTF-8 bytes before sending.".into());
         }
-        let mut state = self.state()?;
         if state.active.is_some() || state.notes_active.is_some() {
             return Err("Wait for the current reply to finish, or stop it first.".into());
         }
@@ -387,7 +422,17 @@ impl Engine {
     }
 
     pub fn prepare_notes(&self, message_id: &str) -> Result<Option<PreparedNotes>, String> {
+        self.prepare_notes_with_provider(message_id, ProviderKind::Ollama, false)
+    }
+
+    pub fn prepare_notes_with_provider(
+        &self,
+        message_id: &str,
+        provider: ProviderKind,
+        remote_consent: bool,
+    ) -> Result<Option<PreparedNotes>, String> {
         let mut state = self.state()?;
+        authorize_provider(&state, provider, remote_consent)?;
         prepare_notes_locked(&mut state, message_id)
     }
 
@@ -428,6 +473,23 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+fn authorize_provider(
+    state: &State,
+    provider: ProviderKind,
+    remote_consent: bool,
+) -> Result<(), String> {
+    if provider != ProviderKind::Codex {
+        return Ok(());
+    }
+    if !state.is_demo {
+        return Err(CODEX_DEMO_ONLY_ERROR.into());
+    }
+    if !remote_consent {
+        return Err(CODEX_CONSENT_REQUIRED_ERROR.into());
+    }
+    Ok(())
 }
 
 fn finish_turn_locked(
@@ -563,6 +625,91 @@ mod tests {
         engine.lock().unwrap();
         engine.unlock(PASSPHRASE, false).unwrap();
         assert_eq!(engine.list_sessions().unwrap(), vec![personal]);
+    }
+
+    #[test]
+    fn codex_requires_demo_and_consent_before_turn_or_notes_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+
+        assert_eq!(ProviderKind::default(), ProviderKind::Ollama);
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Codex).unwrap(),
+            "\"codex\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ProviderKind>("\"ollama\"").unwrap(),
+            ProviderKind::Ollama
+        );
+
+        let error = engine
+            .prepare_turn_with_provider(
+                &session.id,
+                "This unauthorized synthetic turn must not persist.",
+                ProviderKind::Codex,
+                true,
+            )
+            .err()
+            .expect("personal Codex turn should be rejected");
+        assert_eq!(error, CODEX_DEMO_ONLY_ERROR);
+        assert!(engine.list_messages(&session.id).unwrap().is_empty());
+        assert_eq!(engine.require_demo().unwrap_err(), DEMO_REQUIRED_ERROR);
+
+        let turn = engine
+            .prepare_turn(&session.id, "A synthetic Ollama turn.")
+            .unwrap();
+        engine
+            .finish_turn(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap();
+        let error = engine
+            .prepare_notes_with_provider(&turn.assistant.id, ProviderKind::Codex, true)
+            .err()
+            .expect("personal Codex notes should be rejected");
+        assert_eq!(error, CODEX_DEMO_ONLY_ERROR);
+        let ollama_notes = engine
+            .prepare_notes(&turn.assistant.id)
+            .unwrap()
+            .expect("Ollama notes should still claim the pending job");
+        engine.finish_notes(&ollama_notes.attempt_id, None).unwrap();
+
+        engine.lock().unwrap();
+        engine.open_demo(DEMO_ID, DEMO_PASSPHRASE).unwrap();
+        assert!(engine.require_demo().is_ok());
+        let demo_session = engine.list_sessions().unwrap().remove(0);
+        let before = engine.list_messages(&demo_session.id).unwrap().len();
+        let error = engine
+            .prepare_turn_with_provider(
+                &demo_session.id,
+                "This synthetic remote turn lacks consent.",
+                ProviderKind::Codex,
+                false,
+            )
+            .err()
+            .expect("Codex without consent should be rejected");
+        assert_eq!(error, CODEX_CONSENT_REQUIRED_ERROR);
+        assert_eq!(
+            engine.list_messages(&demo_session.id).unwrap().len(),
+            before
+        );
+
+        let allowed = engine
+            .prepare_turn_with_provider(
+                &demo_session.id,
+                "An allowed synthetic Codex turn.",
+                ProviderKind::Codex,
+                true,
+            )
+            .unwrap();
+        engine
+            .finish_turn(&allowed.assistant.id, MessageStatus::Complete)
+            .unwrap();
+        let notes = engine
+            .prepare_notes_with_provider(&allowed.assistant.id, ProviderKind::Codex, true)
+            .unwrap()
+            .expect("allowed Codex notes should claim the job");
+        engine.finish_notes(&notes.attempt_id, None).unwrap();
     }
 
     #[test]

@@ -26,6 +26,7 @@ vi.mock("./lib/desktop", () => ({
     deleteSession: vi.fn(),
     listMessages: vi.fn(),
     listModels: vi.fn(),
+    listCodexModels: vi.fn(),
     sendMessage: vi.fn(),
     cancelTurn: vi.fn(),
   },
@@ -356,5 +357,105 @@ describe("demo and notebook", () => {
     );
     expect(screen.getByText("A fictional source quote.")).toBeInTheDocument();
     expect(screen.getByText("Edited by you")).toBeInTheDocument();
+  });
+});
+
+describe("ChatGPT demo consent", () => {
+  async function chooseCodex() {
+    vi.mocked(desktop.getVaultStatus).mockResolvedValue({
+      exists: true,
+      unlocked: true,
+      isDemo: true,
+    });
+    vi.mocked(desktop.listCodexModels).mockResolvedValue([
+      { name: "synthetic-codex-model", size: 0 },
+    ]);
+    vi.mocked(desktop.listMessages).mockResolvedValue([
+      {
+        id: "demo-reply",
+        sessionId: session.id,
+        role: "assistant",
+        content: "A synthetic demo reply.",
+        status: "complete",
+        createdAt: session.createdAt,
+      },
+    ]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+      target: { value: "codex" },
+    });
+  }
+  it("requires explicit consent for messages and note updates", async () => {
+    await chooseCodex();
+    const consent = screen.getByRole("checkbox", {
+      name: "I agree to send this demo context to OpenAI.",
+    });
+    expect(consent).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
+    await screen.findByText("ChatGPT via Codex is ready");
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Your message" }), {
+      target: { value: "A synthetic remote thought." },
+    });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Your message" }), {
+      key: "Enter",
+    });
+    expect(desktop.sendMessage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Update notes" }));
+    expect(desktop.retryNotes).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "I agree to send this demo context to OpenAI.",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(desktop.sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: "codex",
+          remoteConsent: true,
+          model: "synthetic-codex-model",
+        }),
+      ),
+    );
+  });
+  it("drops stale model discovery and clears consent when switching providers", async () => {
+    await chooseCodex();
+    const discovery = deferred<{ name: string; size: number }[]>();
+    vi.mocked(desktop.listCodexModels).mockReturnValue(discovery.promise);
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "I agree to send this demo context to OpenAI.",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+      target: { value: "ollama" },
+    });
+    await act(async () => {
+      discovery.resolve([{ name: "stale-remote-model", size: 0 }]);
+      await discovery.promise;
+    });
+    expect(
+      screen.queryByRole("combobox", { name: "Model" }),
+    ).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+      target: { value: "codex" },
+    });
+    expect(
+      screen.getByRole("checkbox", {
+        name: "I agree to send this demo context to OpenAI.",
+      }),
+    ).not.toBeChecked();
+  });
+  it("keeps personal vaults on Ollama", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(
+      screen.queryByRole("option", { name: "ChatGPT via Codex" }),
+    ).not.toBeInTheDocument();
   });
 });

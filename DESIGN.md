@@ -93,7 +93,7 @@ The notebook is a full workspace view. Each note has a kind, its visible evidenc
 
 Conversation output has explicit You and Openmind AI labels. Generation and note updates have separate text status. The same Stop control cancels the active operation. A completed reply remains readable while notes update. Failures preserve existing content. Do not invent simulated typing or human-presence indicators.
 
-Settings provide loopback Ollama configuration, a connection check, reading size, send shortcut preference, and system/light/dark appearance. Only the appearance choice goes into browser localStorage. Conversations, drafts, and personal notes must never be stored there.
+Settings provide loopback Ollama configuration, a connection check, reading size, send shortcut preference, and system/light/dark appearance. In the native demo, ChatGPT via Codex is an optional online testing provider. Label it Online, explain the data sent to OpenAI, and require an unchecked consent checkbox before either replies or note updates. Hide this option in personal vaults and the browser sample. Switching providers or locking clears consent. Only the appearance choice goes into browser localStorage. Conversations, drafts, and personal notes must never be stored there.
 
 ## Color and components
 
