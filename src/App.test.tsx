@@ -7,7 +7,12 @@ import {
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { desktop, type Session, type TurnEvent } from "./lib/desktop";
+import {
+  desktop,
+  type MemoryRecord,
+  type Session,
+  type TurnEvent,
+} from "./lib/desktop";
 
 vi.mock("./lib/desktop", () => ({
   isDesktop: true,
@@ -15,8 +20,11 @@ vi.mock("./lib/desktop", () => ({
     getVaultStatus: vi.fn(),
     openDemo: vi.fn(),
     listNotes: vi.fn(),
+    listMemories: vi.fn(),
     editNote: vi.fn(),
     deleteNote: vi.fn(),
+    editMemory: vi.fn(),
+    deleteMemory: vi.fn(),
     retryNotes: vi.fn(),
     createVault: vi.fn(),
     unlockVault: vi.fn(),
@@ -37,6 +45,20 @@ const session: Session = {
   title: "Monday conversation",
   createdAt: "2026-09-07T09:00:00Z",
   updatedAt: "2026-09-07T09:00:00Z",
+};
+const memory: MemoryRecord = {
+  id: "synthetic-memory",
+  sessionId: session.id,
+  sourceMessageId: "synthetic-source",
+  assistantMessageId: "synthetic-assistant",
+  kind: "goal",
+  content: "A synthetic remembered goal.",
+  evidenceQuote: "I want to make a little more room for rest.",
+  evidenceState: "user_reported",
+  revision: 3,
+  edited: false,
+  createdAt: session.createdAt,
+  updatedAt: session.updatedAt,
 };
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -75,6 +97,22 @@ beforeEach(() => {
     isDemo: false,
   });
   vi.mocked(desktop.listNotes).mockResolvedValue([]);
+  vi.mocked(desktop.listMemories).mockResolvedValue([]);
+  vi.mocked(desktop.editMemory).mockResolvedValue({
+    id: "synthetic-memory",
+    sessionId: session.id,
+    sourceMessageId: "synthetic-source",
+    assistantMessageId: "synthetic-assistant",
+    kind: "goal",
+    content: "A synthetic remembered goal.",
+    evidenceQuote: "A synthetic source quote.",
+    evidenceState: "user_confirmed",
+    revision: 2,
+    edited: true,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+  });
+  vi.mocked(desktop.deleteMemory).mockResolvedValue();
   vi.mocked(desktop.listSessions).mockResolvedValue([session]);
   vi.mocked(desktop.listMessages).mockResolvedValue([]);
   vi.mocked(desktop.createSession).mockResolvedValue(session);
@@ -357,6 +395,218 @@ describe("demo and notebook", () => {
     );
     expect(screen.getByText("A fictional source quote.")).toBeInTheDocument();
     expect(screen.getByText("Edited by you")).toBeInTheDocument();
+  });
+});
+
+describe("remembered context workspace", () => {
+  it("groups source-backed context and opens its source conversation", async () => {
+    const person = {
+      ...memory,
+      id: "synthetic-person-memory",
+      kind: "person" as const,
+      content: "A synthetic friend is part of the user's support circle.",
+      evidenceQuote: "My friend checks in on Sundays.",
+    };
+    vi.mocked(desktop.listMemories).mockResolvedValue([memory, person]);
+    vi.mocked(desktop.listMessages).mockResolvedValue([
+      {
+        id: memory.sourceMessageId,
+        sessionId: session.id,
+        role: "user",
+        content: "I want to make a little more room for rest.",
+        status: "complete",
+        createdAt: session.createdAt,
+      },
+    ]);
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Remembered context" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Remembered context" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Goals" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "People" })).toBeInTheDocument();
+    expect(
+      screen.getByText(new RegExp(memory.evidenceQuote)),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /Monday conversation/ })[1]!,
+    );
+    expect(
+      await screen.findByText("I want to make a little more room for rest."),
+    ).toBeInTheDocument();
+  });
+
+  it("corrects wording while keeping original evidence visible", async () => {
+    vi.mocked(desktop.listMemories).mockResolvedValue([memory]);
+    vi.mocked(desktop.editMemory).mockResolvedValue({
+      ...memory,
+      content: "A corrected synthetic goal.",
+      evidenceState: "user_confirmed",
+      revision: 4,
+      edited: true,
+    });
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Remembered context" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Correct wording/ }));
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Correct remembered context" }),
+      { target: { value: "A corrected synthetic goal." } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save correction" }));
+    await screen.findByText("A corrected synthetic goal.");
+    expect(desktop.editMemory).toHaveBeenCalledWith(
+      memory.id,
+      "A corrected synthetic goal.",
+      memory.revision,
+    );
+    expect(screen.getByText(/Edited by you/)).toBeInTheDocument();
+    expect(
+      screen.getByText(new RegExp(memory.evidenceQuote)),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/source quote stays as it was originally captured/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows source-turn deletion scope before forgetting linked context", async () => {
+    const secondMemory = {
+      ...memory,
+      id: "synthetic-memory-2",
+      kind: "concern" as const,
+      content: "A second synthetic memory from the same turn.",
+    };
+    vi.mocked(desktop.listMemories)
+      .mockResolvedValueOnce([memory, secondMemory])
+      .mockResolvedValueOnce([]);
+    vi.mocked(desktop.listNotes)
+      .mockResolvedValueOnce([
+        {
+          id: "linked-note",
+          sessionId: session.id,
+          sourceMessageId: memory.sourceMessageId,
+          kind: "takeaway",
+          content: "A linked edited synthetic note.",
+          evidenceQuote: memory.evidenceQuote,
+          revision: 1,
+          edited: true,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Remembered context" }),
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "Forget" })[0]!);
+    expect(
+      screen.getByRole("heading", {
+        name: "Forget context from this message?",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/removes 2 remembered items and 1 linked note/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("A linked edited synthetic note."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /including every linked note listed below and any wording you edited/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Edited by you/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /original message and reply will not be used for future replies or notes/,
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Forget this context" }),
+    );
+    await waitFor(() =>
+      expect(desktop.deleteMemory).toHaveBeenCalledWith(
+        memory.id,
+        memory.revision,
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(memory.content)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("Nothing remembered yet")).toBeInTheDocument();
+  });
+
+  it("keeps the workspace usable when memory listing fails", async () => {
+    vi.mocked(desktop.listMemories).mockRejectedValue(
+      new Error("Synthetic memory service unavailable."),
+    );
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Remembered context" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Synthetic memory service unavailable.",
+    );
+    expect(
+      screen.getByRole("button", { name: "Try again" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Remembered context" }),
+    ).toBeInTheDocument();
+  });
+
+  it("preserves remembered context when forgetting is rejected", async () => {
+    vi.mocked(desktop.listMemories).mockResolvedValue([memory]);
+    vi.mocked(desktop.deleteMemory).mockRejectedValue(
+      new Error("Synthetic delete rejected."),
+    );
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Remembered context" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Forget" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Forget this context" }),
+    );
+    await waitFor(() =>
+      expect(desktop.deleteMemory).toHaveBeenCalledWith(
+        memory.id,
+        memory.revision,
+      ),
+    );
+    expect(screen.getByText(memory.content)).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Synthetic delete rejected.",
+    );
+  });
+
+  it("does not resurrect forgotten context when the refresh fails", async () => {
+    vi.mocked(desktop.listMemories)
+      .mockResolvedValueOnce([memory])
+      .mockRejectedValueOnce(new Error("Synthetic refresh failed."));
+    vi.mocked(desktop.deleteMemory).mockResolvedValue();
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Remembered context" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Forget" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Forget this context" }),
+    );
+    await waitFor(() =>
+      expect(desktop.deleteMemory).toHaveBeenCalledWith(
+        memory.id,
+        memory.revision,
+      ),
+    );
+    expect(screen.queryByText(memory.content)).not.toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Synthetic refresh failed.",
+    );
   });
 });
 

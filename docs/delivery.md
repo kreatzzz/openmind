@@ -1,6 +1,6 @@
 # Delivery plan
 
-Status: proposed sequencing and release criteria. This phase produces documents only. No installer, application code, CI workflow, or release has been built.
+Status: proposed sequencing and release criteria. A desktop engineering preview and macOS/Windows CI are implemented; see [prototype status](prototype.md) for verified capabilities and remaining work. Signed installers and clinical release remain outstanding.
 
 ## Milestones
 
@@ -93,4 +93,4 @@ Krish owns product scope, visual direction, license, and product release approva
 
 Before clinical evaluation with patients, define the [clinical development requirements](conversation-policy.md#clinical-development-and-jurisdictions), verify resources, complete threat-model review, demonstrate correction and deletion across both note systems, restore a portable encrypted backup, test signed upgrades, and review accessibility on both OSes. Public treatment distribution needs a separate release decision based on clinical evidence and applicable requirements. Passing a fixed engineering suite is evidence about that suite, not proof of clinical effectiveness.
 
-The next implementation task, once requested, should be the narrow native feasibility prototype in stage 1.
+Continue the engineering preview against the remaining gates above. Milestones describe proposed scope; the current implementation is tracked in [prototype status](prototype.md).

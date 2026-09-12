@@ -11,11 +11,18 @@ The first implementation is a single-user desktop foundation. It is not an evalu
 - One active generation, stop control, persistence before displaying chunks, and rejection of late writes after locking.
 - A second, structured Ollama call after a completed reply proposes internal memory and user notes together. Both branches require exact quotes from the current user message and commit in one encrypted transaction. Empty patches are valid. Quotes establish provenance, not semantic or clinical correctness.
 - An editable notebook with source links and revision checks. Generation adds records for its own turn and cannot overwrite existing edits. Note deletion erases its content while retaining a tombstone. Conversation deletion cascades to its messages, notebook entries, internal memory, and note jobs.
-- Bounded retrieval of recent internal memory for later replies, clearly marked as untrusted historical context. Current input takes priority in the context budget.
+- Bounded retrieval of internal memory for later replies, clearly marked as untrusted historical context. User corrections take priority over generated records; current input takes priority in the context budget.
+- A separate Remembered context workspace with grouped statements, search, visible source evidence, conversation links, revision-checked corrections, and explicit forgetting controls. The browser demo provides fictional records with temporary edits.
 - Durable notes jobs and explicit retry without resending the reply. Cancelled, interrupted, or malformed derivations leave existing notes intact. Reopening a vault marks unfinished jobs as failed. Completed replies can retry notes; interrupted replies do not generate notes.
-- Migration from the original conversation-only vault schema to schema version 2. Unknown future schemas are refused.
+- Migration from conversation-only and paired-notes vaults to schema version 3, including memory revisions and source exclusions. Unknown future schemas are refused.
 - A separate seeded demo vault opened with one click. It cannot unlock or replace the personal vault.
 - At most 20 recent messages and 6,000 UTF-8 bytes of conversation context. Each request asks for an 8,192-token context and at most 1,024 output tokens. Extended thinking is disabled in the request. These are conservative prototype limits, not validated budgets for every model or tokenizer.
+
+## Remembered context controls
+
+Corrections update the selected record with a revision check, retain its original source quote, and mark the new wording as user-confirmed. Retrieval labels the correction separately from that original evidence and prioritizes corrected records. The controls are unavailable during an active reply or notes update; the user can stop the operation first.
+
+Forgetting is scoped to the selected source message. Confirmation shows the affected memories and notebook entries, including any edited notes. The transaction clears those derived records and keeps a content-free source exclusion so a retry cannot recreate them. The original user message and its associated assistant reply remain readable in history but are excluded from later model context. Existing backups and provider copies are unchanged. This is not topic-wide forgetting: separately sourced disclosures and later messages can still contain the same information. Delete the conversation to remove its history and derived records from the active vault.
 
 The browser view offers a clearly labeled synthetic sample. Native vault and inference operations require the desktop shell. Connection and reading preferences currently last only for the open app instance. Only the appearance preference is saved in webview local storage.
 
@@ -25,7 +32,7 @@ An experimental ChatGPT subscription adapter using Codex App Server is checked i
 
 ## Not implemented
 
-Entity reconciliation and explicit relationships between memory nodes, semantic retrieval, internal-memory correction controls, summaries, transcript editing, remote APIs, speech input/output, reminders, keychain convenience unlock, OS lock/suspend handling, automatic idle lock, encrypted backup/export, and signed updates are future work.
+Entity reconciliation and explicit relationships between memory nodes, semantic retrieval, topic-wide forgetting, summaries, transcript editing, remote APIs, speech input/output, reminders, keychain convenience unlock, OS lock/suspend handling, automatic idle lock, encrypted backup/export, and signed updates are future work.
 
 The current extraction reads only the user message for its turn. It does not derive commitments from the assistant response, merge older entities, or process interrupted replies. One model request runs at a time, so a new reply waits until the notes request finishes or is stopped. This is the first implementation of the two-call design, not the complete job scheduling and graph specification. Deleting a notebook entry does not remove its source or internal memory; delete the conversation to remove all of those records from the active vault. Existing backups are outside that deletion.
 
@@ -107,3 +114,9 @@ This was verified on the development machine on September 8, 2026: the native Wa
 The production frontend build, 11 UI tests, 44 core regression tests, Clippy with warnings denied, formatting, and native Linux compilation pass. Two opt-in live Ollama tests pass using `qwen3:0.6b`, covering streaming and structured notes extraction. Native keyboard testing opened the separate demo, sent a fictional message, displayed the saved reply, and completed the notes update. Browser checks covered the notebook editor, dark appearance, and narrow layouts without page errors or horizontal overflow.
 
 The small Ollama fixture establishes protocol operation only. Its responses have not passed the proposed conversation-policy evaluations and must not be treated as clinical guidance. macOS CI passed the Geist/demo revision. Windows exposed an HTTP fixture that closed without draining POST bodies; that fixture is corrected in this checkpoint and awaits a CI rerun. The pull request tracks subsequent checks. Signed installers remain unverified.
+
+## Verification recorded September 12, 2026
+
+The remembered-context implementation passes the production frontend build, 17 UI tests, 48 core regression tests, native macOS compilation, formatting, and all-target Clippy with warnings denied. Three opt-in live-provider tests were not run. Regression coverage includes populated schema-v2 migration followed by forgetting, correction persistence, source-history exclusion, stale derivation rejection, linked-note deletion, and UI refresh failures.
+
+A production-build browser check using synthetic data exercised correction, source-scoped forgetting and linked-note removal, light/dark appearance, reduced motion, and desktop/narrow layouts without page errors or horizontal overflow. This does not establish native VoiceOver/NVDA accessibility, Windows behavior, live inference quality, or signed installer readiness. macOS and Windows CI runs on the pull request; native manual accessibility and installer checks remain outstanding.

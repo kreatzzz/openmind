@@ -10,7 +10,7 @@ use crate::{
     codex,
     engine::{Engine, NotesStatus, PreparedNotes, ProviderKind, TurnEvent, VaultStatus},
     models::{Message, MessageRole, MessageStatus, Session},
-    notes::UserNote,
+    notes::{MemoryRecord, UserNote},
     provider::{self, ChatMessage, ModelInfo, ProviderError},
 };
 
@@ -77,6 +77,36 @@ async fn delete_note(
 ) -> Result<(), String> {
     blocking(&state, move |engine| {
         engine.delete_note(&id, expected_revision)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn list_memories(state: State<'_, DesktopState>) -> Result<Vec<MemoryRecord>, String> {
+    blocking(&state, Engine::list_memories).await
+}
+
+#[tauri::command]
+async fn edit_memory(
+    state: State<'_, DesktopState>,
+    id: String,
+    content: String,
+    expected_revision: i64,
+) -> Result<MemoryRecord, String> {
+    blocking(&state, move |engine| {
+        engine.edit_memory(&id, &content, expected_revision)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_memory(
+    state: State<'_, DesktopState>,
+    id: String,
+    expected_revision: i64,
+) -> Result<(), String> {
+    blocking(&state, move |engine| {
+        engine.delete_memory(&id, expected_revision)
     })
     .await
 }
@@ -269,6 +299,7 @@ async fn cancel_turn(state: State<'_, DesktopState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn send_message(
     state: State<'_, DesktopState>,
     session_id: String,
@@ -445,6 +476,9 @@ pub fn run() {
             list_notes,
             edit_note,
             delete_note,
+            list_memories,
+            edit_memory,
+            delete_memory,
             retry_notes,
             create_vault,
             unlock_vault,

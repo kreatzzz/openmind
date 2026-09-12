@@ -83,7 +83,7 @@ Krish selected Vercel's Geist design system for this interface. Openmind keeps i
 
 ## Implemented desktop preview
 
-The shell has a 248px navigation rail, a 64px header, and a reading column around 680px wide. The rail contains conversation search and history, Your notes, Settings, and Lock vault. Below 960px navigation moves into an accessible dialog. Content uses one column on narrow screens without hiding essential actions.
+The shell has a 248px navigation rail, a 64px header, and a reading column around 680px wide. The rail contains conversation search and history, Your notes, Remembered context, Settings, and Lock vault. Below 960px navigation moves into an accessible dialog. Content uses one column on narrow screens without hiding essential actions.
 
 The welcome screen is a compact workspace entry, with vault creation or unlock and a visible Open demo action. Demo opens fictional conversations and notes without creating a personal account. The native demo uses a separate demo vault. Its known credentials are unsuitable for personal information. Keep the synthetic-only banner visible in every demo view. The browser demo permits temporary edits to fictional notes and clearly states that it has no inference or storage.
 
@@ -94,6 +94,12 @@ The notebook is a full workspace view. Each note has a kind, its visible evidenc
 Conversation output has explicit You and Openmind AI labels. Generation and note updates have separate text status. The same Stop control cancels the active operation. A completed reply remains readable while notes update. Failures preserve existing content. Do not invent simulated typing or human-presence indicators.
 
 Settings provide loopback Ollama configuration, a connection check, reading size, send shortcut preference, and system/light/dark appearance. In the native demo, ChatGPT via Codex is an optional online testing provider. Label it Online, explain the data sent to OpenAI, and require an unchecked consent checkbox before either replies or note updates. Hide this option in personal vaults and the browser sample. Switching providers or locking clears consent. Only the appearance choice goes into browser localStorage. Conversations, drafts, and personal notes must never be stored there.
+
+## Remembered context
+
+Remembered context is a separate workspace from Your notes. Group concise statements by people, events, goals, preferences, and concerns. Show their source date, evidence status, and a link to the original message. Search filters the visible records. Corrections preserve the original quotation with an explicit original-source label; do not present that quotation as evidence of the correction.
+
+Correct and Forget are explicit actions with revision checks. Explain the affected source-message scope before forgetting, including linked memories and notebook entries, retained transcript, future context exclusions, and backup limits. Keep failures visible and preserve edits for retry. The browser sample uses fictional records and temporary state only.
 
 ## Color and components
 
@@ -111,6 +117,6 @@ Interaction is immediate. Hover and focus color transitions last at most 120ms a
 
 Clinical therapy is the intended product scope; treatment model and evidence remain unresolved. This engineering preview must not claim evaluated clinical care. Do not imply a human clinician is watching or that the AI has feelings.
 
-Remote providers, speech input, scheduling, urgent support resources, and user-facing remembered context remain proposed work. Do not add nonfunctional navigation entries for them. Any remote provider must explain whether messages leave the device and obtain explicit consent. Preserve correction, deletion, evidence, and the fact that a device owner can inspect decrypted internal records.
+Remote providers, speech input, scheduling, and urgent support resources remain proposed work. Do not add nonfunctional navigation entries for them. Any remote provider must explain whether messages leave the device and obtain explicit consent. Preserve correction, deletion, evidence, and the fact that a device owner can inspect decrypted internal records.
 
 Browser checks do not establish native macOS or Windows accessibility. Native webview, keyboard, screen-reader, 200% zoom, and platform title-bar validation remain required before release.

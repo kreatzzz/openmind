@@ -37,6 +37,29 @@ impl MemoryKind {
     }
 }
 
+/// The provenance state shown with a remembered record. A generated record is
+/// only accepted from an explicit user quote. A direct user correction is
+/// promoted to `user_confirmed` while retaining the original source reference
+/// so the correction and its provenance survive a restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEvidenceState {
+    UserReported,
+    UserConfirmed,
+    Inferred,
+}
+
+impl MemoryEvidenceState {
+    pub(crate) fn from_db_value(value: &str) -> Option<Self> {
+        match value {
+            "user_reported" => Some(Self::UserReported),
+            "user_confirmed" => Some(Self::UserConfirmed),
+            "inferred" => Some(Self::Inferred),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Debug for MemoryKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -56,6 +79,46 @@ pub struct MemoryCandidate {
     pub kind: MemoryKind,
     pub content: String,
     pub evidence_quote: String,
+}
+
+/// A source-backed internal memory record that can be corrected or forgotten
+/// by the user. Deleted records remain as content-free encrypted tombstones
+/// and are omitted from `list_memories`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRecord {
+    pub id: String,
+    pub session_id: String,
+    pub source_message_id: String,
+    pub assistant_message_id: String,
+    pub kind: MemoryKind,
+    pub content: String,
+    pub evidence_quote: String,
+    pub evidence_state: MemoryEvidenceState,
+    pub revision: i64,
+    pub edited: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl fmt::Debug for MemoryRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MemoryRecord")
+            .field("id", &self.id)
+            .field("session_id", &self.session_id)
+            .field("source_message_id", &self.source_message_id)
+            .field("assistant_message_id", &self.assistant_message_id)
+            .field("kind", &self.kind)
+            .field("evidence_state", &self.evidence_state)
+            .field("content_len", &self.content.len())
+            .field("evidence_quote_len", &self.evidence_quote.len())
+            .field("revision", &self.revision)
+            .field("edited", &self.edited)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for MemoryCandidate {

@@ -42,6 +42,27 @@ export interface UserNote {
   updatedAt: string;
 }
 
+/** A concise, source-backed record from Openmind's internal remembered context. */
+export type MemoryKind = "person" | "event" | "goal" | "preference" | "concern";
+
+export type MemoryEvidenceState =
+  "user_reported" | "user_confirmed" | "inferred";
+
+export interface MemoryRecord {
+  id: string;
+  sessionId: string;
+  sourceMessageId: string;
+  assistantMessageId: string;
+  kind: MemoryKind;
+  content: string;
+  evidenceQuote: string;
+  evidenceState: MemoryEvidenceState;
+  revision: number;
+  edited: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type TurnEvent =
   | { type: "message"; message: Message }
   | { type: "chunk"; messageId: string; content: string }
@@ -81,10 +102,15 @@ export const desktop = {
   openDemo: (loginId: string, passphrase: string) =>
     native<VaultStatus>("open_demo", { loginId, passphrase }),
   listNotes: () => native<UserNote[]>("list_notes"),
+  listMemories: () => native<MemoryRecord[]>("list_memories"),
   editNote: (id: string, content: string, expectedRevision: number) =>
     native<UserNote>("edit_note", { id, content, expectedRevision }),
   deleteNote: (id: string, expectedRevision: number) =>
     native<void>("delete_note", { id, expectedRevision }),
+  editMemory: (id: string, content: string, expectedRevision: number) =>
+    native<MemoryRecord>("edit_memory", { id, content, expectedRevision }),
+  deleteMemory: (id: string, expectedRevision: number) =>
+    native<void>("delete_memory", { id, expectedRevision }),
   async retryNotes({
     messageId,
     baseUrl,

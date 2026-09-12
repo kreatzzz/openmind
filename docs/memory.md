@@ -1,6 +1,6 @@
 # Memory model
 
-Status: proposed. The graph provides continuity across conversations. It is not a psychological diagnosis, a simulation of a human mind, or a store of model chain-of-thought.
+Status: full-product proposal. The [engineering preview](prototype.md#remembered-context-controls) implements source-backed records, corrections, and source-message-scoped forgetting; relationships, semantic retrieval, and topic-wide forgetting remain proposed. The graph provides continuity across conversations. It is not a psychological diagnosis, a simulation of a human mind, or a store of model chain-of-thought.
 
 ## What the graph represents
 
