@@ -365,6 +365,11 @@ pub struct NotesInput {
     pub assistant_id: String,
     pub user: crate::models::Message,
     pub assistant: crate::models::Message,
+    /// Branch permissions captured when the source turn was submitted. They
+    /// remain fixed for this derivation attempt; later session changes revoke
+    /// pending work instead of granting it a new permission.
+    pub memory_enabled: bool,
+    pub notes_enabled: bool,
 }
 
 impl fmt::Debug for NotesInput {
@@ -374,6 +379,8 @@ impl fmt::Debug for NotesInput {
             .field("assistant_id", &self.assistant_id)
             .field("user", &self.user)
             .field("assistant", &self.assistant)
+            .field("memory_enabled", &self.memory_enabled)
+            .field("notes_enabled", &self.notes_enabled)
             .finish()
     }
 }

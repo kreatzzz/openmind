@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -31,6 +32,7 @@ vi.mock("./lib/desktop", () => ({
     lockVault: vi.fn(),
     listSessions: vi.fn(),
     createSession: vi.fn(),
+    updateSession: vi.fn(),
     deleteSession: vi.fn(),
     listMessages: vi.fn(),
     listModels: vi.fn(),
@@ -45,6 +47,18 @@ const session: Session = {
   title: "Monday conversation",
   createdAt: "2026-09-07T09:00:00Z",
   updatedAt: "2026-09-07T09:00:00Z",
+  revision: 3,
+  memoryEnabled: true,
+  notesEnabled: true,
+};
+const secondSession: Session = {
+  id: "synthetic-session-two",
+  title: "Tuesday conversation",
+  createdAt: "2026-09-08T09:00:00Z",
+  updatedAt: "2026-09-08T09:00:00Z",
+  revision: 8,
+  memoryEnabled: true,
+  notesEnabled: true,
 };
 const memory: MemoryRecord = {
   id: "synthetic-memory",
@@ -116,6 +130,10 @@ beforeEach(() => {
   vi.mocked(desktop.listSessions).mockResolvedValue([session]);
   vi.mocked(desktop.listMessages).mockResolvedValue([]);
   vi.mocked(desktop.createSession).mockResolvedValue(session);
+  vi.mocked(desktop.updateSession).mockResolvedValue({
+    ...session,
+    revision: session.revision + 1,
+  });
   vi.mocked(desktop.listModels).mockResolvedValue([
     { name: "synthetic-model", size: 100 },
   ]);
@@ -273,6 +291,237 @@ describe("native conversation lifecycle", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Connection unavailable.",
     );
+  });
+});
+
+describe("conversation controls", () => {
+  it("saves an edited title and independent settings with the current revision", async () => {
+    const updated = {
+      ...session,
+      title: "A quieter Monday",
+      memoryEnabled: false,
+      notesEnabled: true,
+      revision: 4,
+    };
+    vi.mocked(desktop.updateSession).mockResolvedValue(updated);
+    await openConnectedApp();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Conversation controls" }),
+    );
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Conversation title" }),
+      {
+        target: { value: updated.title },
+      },
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Remembered context" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() =>
+      expect(desktop.updateSession).toHaveBeenCalledWith(
+        session.id,
+        updated.title,
+        false,
+        true,
+        session.revision,
+      ),
+    );
+    expect(
+      await screen.findByRole("button", { name: /A quieter Monday/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Remembered context is off for this conversation."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps entered controls on save failure and retries with a refreshed revision", async () => {
+    const refreshed = { ...session, revision: 9 };
+    const saved = {
+      ...refreshed,
+      title: "Retry this conversation",
+      memoryEnabled: false,
+      notesEnabled: true,
+      revision: 10,
+    };
+    vi.mocked(desktop.listSessions)
+      .mockResolvedValueOnce([session])
+      .mockResolvedValueOnce([refreshed]);
+    vi.mocked(desktop.updateSession)
+      .mockRejectedValueOnce(new Error("Synthetic revision conflict."))
+      .mockResolvedValueOnce(saved);
+    await openConnectedApp();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Conversation controls" }),
+    );
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Conversation title" }),
+      {
+        target: { value: saved.title },
+      },
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Remembered context" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(
+      await within(screen.getByRole("dialog")).findByRole("alert"),
+    ).toHaveTextContent("Synthetic revision conflict.");
+    expect(
+      screen.getByRole("textbox", { name: "Conversation title" }),
+    ).toHaveValue(saved.title);
+    expect(
+      screen.getByRole("checkbox", { name: "Remembered context" }),
+    ).not.toBeChecked();
+    await waitFor(() => expect(desktop.listSessions).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(desktop.updateSession).toHaveBeenNthCalledWith(
+        2,
+        session.id,
+        saved.title,
+        false,
+        true,
+        refreshed.revision,
+      ),
+    );
+    expect(
+      await screen.findByRole("button", { name: /Retry this conversation/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps conversation drafts separate while switching sessions", async () => {
+    vi.mocked(desktop.listSessions).mockResolvedValue([session, secondSession]);
+    vi.mocked(desktop.listMessages).mockResolvedValue([]);
+    render(<App />);
+    const composer = await screen.findByRole("textbox", {
+      name: "Your message",
+    });
+    fireEvent.change(composer, { target: { value: "Draft for Monday." } });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Tuesday conversation/ }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Your message" })).toHaveValue(
+        "",
+      ),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /Monday conversation/ }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Your message" })).toHaveValue(
+        "Draft for Monday.",
+      ),
+    );
+  });
+
+  it("disables controls during an active reply", async () => {
+    const turn = deferred<void>();
+    vi.mocked(desktop.sendMessage).mockReturnValue(turn.promise);
+    await openConnectedApp();
+    submit("A synthetic active reply.");
+
+    await screen.findByRole("button", { name: "Stop reply" });
+    expect(
+      screen.getByRole("button", { name: "Conversation controls" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Settings" })).toBeDisabled();
+
+    await act(async () => {
+      turn.resolve();
+      await turn.promise;
+    });
+  });
+
+  it("shows scoped off status only in the conversation and skips disabled updates", async () => {
+    const disabledSession = {
+      ...session,
+      memoryEnabled: false,
+      notesEnabled: false,
+    };
+    vi.mocked(desktop.listSessions).mockResolvedValue([disabledSession]);
+    const turn = deferred<void>();
+    let emit: ((event: TurnEvent) => void) | undefined;
+    vi.mocked(desktop.sendMessage).mockImplementation(({ onEvent }) => {
+      emit = onEvent;
+      return turn.promise;
+    });
+    await openConnectedApp();
+
+    expect(
+      screen.getByText(
+        "Remembered context and Your notes are off for this conversation.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Remembered context" }));
+    expect(
+      screen.queryByText(
+        "Remembered context and Your notes are off for this conversation.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Conversation controls" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: /Monday conversation/ }),
+    );
+    expect(
+      screen.getByText(
+        "Remembered context and Your notes are off for this conversation.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Update notes" }),
+    ).not.toBeInTheDocument();
+
+    submit("A synthetic skipped update.");
+    act(() =>
+      emit?.({
+        type: "notes",
+        messageId: "synthetic-reply",
+        status: "skipped",
+        memoryEnabled: false,
+        notesEnabled: false,
+      }),
+    );
+    expect(screen.queryByText(/updated/)).not.toBeInTheDocument();
+    await act(async () => {
+      turn.resolve();
+      await turn.promise;
+    });
+  });
+
+  it("ignores a save result that arrives after the vault is locked", async () => {
+    const save = deferred<Session>();
+    vi.mocked(desktop.updateSession).mockReturnValue(save.promise);
+    await openConnectedApp();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Conversation controls" }),
+    );
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Conversation title" }),
+      {
+        target: { value: "Stale saved title" },
+      },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(desktop.updateSession).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("button", { name: "Lock vault" }));
+    await screen.findByRole("button", { name: "Unlock your vault" });
+    await act(async () => {
+      save.resolve({ ...session, title: "Stale saved title", revision: 4 });
+      await save.promise;
+    });
+    expect(screen.queryByText("Stale saved title")).not.toBeInTheDocument();
   });
 });
 

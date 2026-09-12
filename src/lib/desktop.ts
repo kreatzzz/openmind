@@ -5,6 +5,9 @@ export interface Session {
   title: string;
   createdAt: string;
   updatedAt: string;
+  revision: number;
+  memoryEnabled: boolean;
+  notesEnabled: boolean;
 }
 
 export interface Message {
@@ -71,8 +74,10 @@ export type TurnEvent =
   | {
       type: "notes";
       messageId: string;
-      status: "updating" | "complete" | "failed";
+      status: "updating" | "complete" | "failed" | "skipped";
       message?: string;
+      memoryEnabled?: boolean;
+      notesEnabled?: boolean;
     };
 
 export const isDesktop = isTauri();
@@ -148,6 +153,20 @@ export const desktop = {
   lockVault: () => native<void>("lock_vault"),
   listSessions: () => native<Session[]>("list_sessions"),
   createSession: () => native<Session>("create_session"),
+  updateSession: (
+    id: string,
+    title: string,
+    memoryEnabled: boolean,
+    notesEnabled: boolean,
+    expectedRevision: number,
+  ) =>
+    native<Session>("update_session", {
+      id,
+      title,
+      memoryEnabled,
+      notesEnabled,
+      expectedRevision,
+    }),
   deleteSession: (id: string) => native<void>("delete_session", { id }),
   listMessages: (sessionId: string) =>
     native<Message[]>("list_messages", { sessionId }),

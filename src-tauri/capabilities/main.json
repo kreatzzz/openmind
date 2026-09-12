@@ -12,6 +12,7 @@
     "allow-lock-vault",
     "allow-list-sessions",
     "allow-create-session",
+    "allow-update-session",
     "allow-list-messages",
     "allow-list-models",
     "allow-list-codex-models",

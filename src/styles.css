@@ -1072,6 +1072,104 @@ input[type="checkbox"] {
   align-items: center;
   gap: 12px;
 }
+.conversation-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 32px;
+  background: var(--subtle);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.conversation-status .text-button {
+  min-height: 28px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.conversation-status .text-button:hover {
+  color: var(--ink);
+}
+.conversation-controls-intro {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+  margin-bottom: 20px;
+}
+.conversation-controls-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-bottom: 14px;
+}
+.conversation-controls-error svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.conversation-preferences {
+  border: 0;
+  margin: 24px 0 0;
+  padding: 0;
+}
+.conversation-preferences legend {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+.conversation-toggle {
+  display: flex !important;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 64px;
+  border-top: 1px solid var(--line);
+  margin: 0 !important;
+  padding: 14px 0;
+}
+.conversation-toggle:last-of-type {
+  border-bottom: 1px solid var(--line);
+}
+.conversation-toggle > span {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.conversation-toggle strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.conversation-toggle small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.conversation-toggle input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.conversation-controls-note {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.65;
+  margin-top: 14px;
+}
+.conversation-controls-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  margin-top: 24px;
+  padding-top: 16px;
+}
 .deletion-description {
   color: var(--muted);
   font-size: 13px;
@@ -1594,5 +1692,17 @@ input[type="checkbox"] {
   }
   .memory-source {
     min-height: 40px;
+  }
+}
+@media (max-width: 719px) {
+  .conversation-status {
+    align-items: flex-start;
+    padding: 8px 20px;
+  }
+  .conversation-controls-actions {
+    flex-wrap: wrap-reverse;
+  }
+  .conversation-controls-actions button {
+    flex: 1 1 120px;
   }
 }
