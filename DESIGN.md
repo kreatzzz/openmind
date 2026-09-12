@@ -1,59 +1,58 @@
 ---
 version: alpha
 name: Openmind
-description: A quiet desktop space for reflection, with warm paper, dark ink, and a restrained moss accent.
+description: A focused desktop workspace using the Geist design system's neutral colors, typography, and component proportions.
 colors:
-  primary: "#365748"
+  background: "#FFFFFF"
+  surface: "#FAFAFA"
+  ink: "#171717"
+  muted: "#666666"
+  line: "#E5E5E5"
+  input-border: "#8F8F8F"
+  selected: "#EBEBEB"
+  primary: "#171717"
   on-primary: "#FFFFFF"
-  background: "#F4F1E9"
-  surface: "#FCFAF5"
-  ink: "#292D29"
-  muted: "#666A60"
-  line: "#D8D8CC"
-  selected: "#E2E9DE"
-  error: "#994132"
-  night-background: "#1C211E"
-  night-surface: "#252C27"
-  night-ink: "#EDEFE5"
-  night-muted: "#B1B9AD"
-  night-accent: "#A9C4AE"
+  focus: "#0070F3"
+  error: "#CC0000"
+  night-background: "#0A0A0A"
+  night-surface: "#111111"
+  night-ink: "#EDEDED"
+  night-muted: "#A1A1A1"
+  night-line: "#292929"
+  night-input-border: "#666666"
+  night-focus: "#52A8FF"
 typography:
-  headline:
-    fontFamily: "Newsreader, Georgia, serif"
-    fontSize: 36px
-    fontWeight: 400
-    lineHeight: 1.2
-    letterSpacing: "-0.02em"
   title:
-    fontFamily: "Newsreader, Georgia, serif"
-    fontSize: 26px
-    fontWeight: 400
-    lineHeight: 1.3
+    fontFamily: "Geist Variable, Geist, system-ui, sans-serif"
+    fontSize: 24px
+    fontWeight: 600
+    lineHeight: 1.35
+    letterSpacing: "-0.7px"
   conversation:
-    fontFamily: "Inter, system-ui, sans-serif"
+    fontFamily: "Geist Variable, Geist, system-ui, sans-serif"
     fontSize: 17px
     fontWeight: 400
-    lineHeight: 1.7
+    lineHeight: 1.75
   body:
-    fontFamily: "Inter, system-ui, sans-serif"
-    fontSize: 16px
-    fontWeight: 400
-    lineHeight: 1.6
-  label:
-    fontFamily: "Inter, system-ui, sans-serif"
+    fontFamily: "Geist Variable, Geist, system-ui, sans-serif"
     fontSize: 14px
-    fontWeight: 500
-    lineHeight: 1.4
-  caption:
-    fontFamily: "Inter, system-ui, sans-serif"
+    fontWeight: 400
+    lineHeight: 1.7
+  label:
+    fontFamily: "Geist Variable, Geist, system-ui, sans-serif"
     fontSize: 13px
+    fontWeight: 500
+    lineHeight: 1.5
+  metadata:
+    fontFamily: "Geist Mono Variable, monospace"
+    fontSize: 11px
     fontWeight: 400
     lineHeight: 1.5
 rounded:
   sm: 6px
-  md: 12px
-  lg: 20px
-  full: 9999px
+  md: 8px
+  lg: 12px
+  composer: 14px
 spacing:
   xs: 4px
   sm: 8px
@@ -62,159 +61,56 @@ spacing:
   xl: 32px
   xxl: 48px
 components:
-  page:
-    backgroundColor: "{colors.background}"
-    textColor: "{colors.ink}"
-    typography: "{typography.body}"
-  conversation:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.ink}"
-    typography: "{typography.conversation}"
   button-primary:
     backgroundColor: "{colors.primary}"
     textColor: "{colors.on-primary}"
-    typography: "{typography.label}"
-    rounded: "{rounded.md}"
-    height: 44px
-    padding: 16px
-  session-selected:
-    backgroundColor: "{colors.selected}"
-    textColor: "{colors.ink}"
     rounded: "{rounded.sm}"
-    padding: 12px
-  metadata:
+    height: 40px
+  field:
     backgroundColor: "{colors.background}"
-    textColor: "{colors.muted}"
-    typography: "{typography.caption}"
-  error-message:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.error}"
-    typography: "{typography.label}"
-  divider:
-    backgroundColor: "{colors.line}"
-    height: 1px
-  page-night:
-    backgroundColor: "{colors.night-background}"
-    textColor: "{colors.night-ink}"
-  conversation-night:
-    backgroundColor: "{colors.night-surface}"
-    textColor: "{colors.night-ink}"
-  metadata-night:
-    backgroundColor: "{colors.night-background}"
-    textColor: "{colors.night-muted}"
-  button-primary-night:
-    backgroundColor: "{colors.night-accent}"
-    textColor: "{colors.night-background}"
-    rounded: "{rounded.md}"
-    height: 44px
+    borderColor: "{colors.input-border}"
+    rounded: "{rounded.sm}"
+    height: 40px
+  dialog:
+    backgroundColor: "{colors.background}"
+    borderColor: "{colors.line}"
+    rounded: "{rounded.lg}"
 ---
 
 # Openmind design direction
 
-## Overview
+Krish selected Vercel's Geist design system for this interface. Openmind keeps its own name and mark. The implementation uses bundled Geist and Geist Mono fonts, neutral semantic tokens, compact controls, and restrained elevation. Reference the official [colors](https://vercel.com/geist/colors), [typography](https://vercel.com/geist/typography), [buttons](https://vercel.com/geist/button), and [materials](https://vercel.com/geist/materials) when extending components. This is a local implementation of those principles, not an imported Vercel component library.
 
-Proposed direction, pending visual review with Krish. The interface should give a personal conversation room to breathe. Use a broad writing area, visible dates, quiet navigation, and a single clear action. The visual character comes from proportion, typography, and a small session marker that recalls the margin of a notebook.
+## Implemented desktop preview
 
-The intended product is clinical therapy, with the treatment model and evidence still to be defined. The app is honest about being AI. Avoid a human therapist avatar, relationship status, or an animated face. The interface should not imply a clinician is watching or that a model has feelings. Clearly distinguish an experimental build from an evaluated clinical release.
+The shell has a 248px navigation rail, a 64px header, and a reading column around 680px wide. The rail contains conversation search and history, Your notes, Settings, and Lock vault. Below 960px navigation moves into an accessible dialog. Content uses one column on narrow screens without hiding essential actions.
 
-This document follows the token-and-prose format in the [Google Labs DESIGN.md specification](https://github.com/google-labs-code/design.md/blob/main/docs/spec.md). Tokens above define proposed values. No interface has been implemented or visually validated yet.
+The welcome screen is a compact workspace entry, with vault creation or unlock and a visible Open demo action. Demo opens fictional conversations and notes without creating a personal account. The native demo uses a separate demo vault. Its known credentials are unsuitable for personal information. Keep the synthetic-only banner visible in every demo view. The browser demo permits temporary edits to fictional notes and clearly states that it has no inference or storage.
 
-## Colors
+The conversation header offers deletion with confirmation. Deleting a conversation removes its transcript and derived notes and internal memory from the active vault. Do not promise backup erasure.
 
-Use warm paper for the app background and a slightly lighter writing area. Dark ink carries reading content. Moss marks the primary action, current session, and focus accents. It should occupy little of the screen.
+The notebook is a full workspace view. Each note has a kind, its visible evidence quote, a source conversation link, edit controls, and an explicit deletion confirmation. Edited notes are labeled. Source links reveal the conversation and outline the referenced message. Keep the transcript flat and readable; do not present raw internal memory as notebook content.
 
-Use the night tokens as semantic replacements when the user selects dark mode or follows the OS appearance. Preserve the warm, low-chroma character. Do not invert the entire screen mechanically.
+Conversation output has explicit You and Openmind AI labels. Generation and note updates have separate text status. The same Stop control cancels the active operation. A completed reply remains readable while notes update. Failures preserve existing content. Do not invent simulated typing or human-presence indicators.
 
-The line token is for decorative division, not the only indicator of input boundaries or focus. Functional boundaries must reach 3:1 contrast against adjacent colors. Body text needs at least 4.5:1, and large text at least 3:1. Errors use both text and an icon, never color alone. Dark-mode focus, disabled, hover, and urgent-support states need final values and contrast checks during implementation.
+Settings provide loopback Ollama configuration, a connection check, reading size, send shortcut preference, and system/light/dark appearance. In the native demo, ChatGPT via Codex is an optional online testing provider. Label it Online, explain the data sent to OpenAI, and require an unchecked consent checkbox before either replies or note updates. Hide this option in personal vaults and the browser sample. Switching providers or locking clears consent. Only the appearance choice goes into browser localStorage. Conversations, drafts, and personal notes must never be stored there.
 
-## Typography
+## Color and components
 
-Newsreader is reserved for page titles and occasional opening questions. Inter carries conversations, controls, and settings. Bundle licensed font assets with the app; keep their license notices and avoid runtime font downloads. Use the listed system fallbacks until bundled assets are available.
+Use background for content and surface for the rail and subtle component separation. Neutral shades cover resting, hover, active, border, and text roles. Blue is reserved for focus and the demo disclosure. Errors include readable text. Color alone must not convey status.
 
-Conversation text begins at 17px with generous leading and supports a user font-size control. Do not put long responses in italic serif text. Keep content around 60 to 72 characters wide. Balance headings and use readable wrapping for paragraphs.
+Inputs have a stronger border than structural dividers. Preserve visible keyboard focus and readable contrast in both themes. Buttons and inputs use a shared 6px radius and a minimum 40px desktop height. Touch layouts increase action height to 44px. The composer has 8px padding around a 6px send button, giving it a 14px outer radius. Dialogs use 12px corners with a small layered shadow. Avoid decorative gradients, glass, oversized welcome headlines, and stacks of unnecessary cards.
 
-Use sentence case, normal punctuation, and direct language. Dates and durations use tabular numerals. On macOS, apply antialiasing where it improves readability. Labels should remain legible at normal viewing distance; small type is not a substitute for hierarchy.
+## Type and motion
 
-## Layout
+Use Geist for titles, prose, and controls. Reserve Geist Mono for compact technical values or counts. Conversation text defaults to 17px and can increase to 22px. Use tabular numerals for dates and values. Headings balance their wrapping; content preserves paragraph breaks and wraps long words.
 
-At a 1280 by 820 desktop window, begin with a 232px left rail and a centered conversation column up to 720px wide. Use 32px outer spacing and 24px between major groups. Respect the native title bar, macOS traffic lights, Windows window controls, and draggable regions without overlapping interactive content.
+Interaction is immediate. Hover and focus color transitions last at most 120ms and specify their properties. Respect reduced motion. Do not animate routine navigation, streamed text, or notebook updates. Icons use the existing Lucide outline set with currentColor.
 
-The rail contains Openmind, "New conversation," a chronological session list, "Your notes," "Remembered context," "Schedule," and "Settings." Dates organize history. Avoid model controls and technical metrics in the conversation header.
+## Product boundaries
 
-The main view has a short title, optional session date, a readable transcript, and a composer at the bottom of the available space. A narrow margin mark identifies the selected session. User and assistant messages have explicit accessible speaker labels and enough separation to follow the exchange. Do not rely solely on left/right alignment or pale backgrounds.
+Clinical therapy is the intended product scope; treatment model and evidence remain unresolved. This engineering preview must not claim evaluated clinical care. Do not imply a human clinician is watching or that the AI has feelings.
 
-Below 960px, collapse the rail into a keyboard-accessible drawer. Below 720px or at high zoom, use one column with no lost controls or horizontal reading scroll. Do not enforce a minimum window size that makes 200% zoom unusable.
+Remote providers, speech input, scheduling, urgent support resources, and user-facing remembered context remain proposed work. Do not add nonfunctional navigation entries for them. Any remote provider must explain whether messages leave the device and obtain explicit consent. Preserve correction, deletion, evidence, and the fact that a device owner can inspect decrypted internal records.
 
-Opening Openmind resumes the last safe navigation state after unlocking. It must not reveal conversation snippets on the lock screen. On an empty account, "What would you like to talk about?" and a single start action are enough.
-
-## Elevation & Depth
-
-Separate the writing area from the app background through color and space. Keep the transcript flat. Use a small layered shadow for menus and dialogs, for example `0 1px 3px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.08)` in light mode. Dark mode needs its own visible border and shadow treatment.
-
-Use borders for structure, selected state, and input affordances. Avoid stacks of cards, glass panels, decorative blur, textured images behind text, and a dashboard of personal statistics.
-
-## Shapes
-
-Use 12px radii on controls and 20px on a composer containing 12px inner controls with 8px padding. Use 6px for compact list selections. Reserve pills for a short status such as "On this device," not every button.
-
-Icons use one consistent outline set and `currentColor`. Match stroke weight to adjacent text and align asymmetric icons optically. Visible controls target 44px; dense desktop actions may use a 40px hit area. Hidden expansion of a hit area must not overlap its neighbor.
-
-## Components
-
-### Conversation and composer
-
-The composer grows up to a reasonable fraction of window height and then scrolls internally. Offer send, stop while generating, and an accessible multiline shortcut hint. Start with Enter to send and Shift+Enter for a newline, with a preference to reverse the behavior. Respect IME composition and never submit during composition.
-
-Before the first text arrives, show "Preparing a reply" with a static working indicator and a stop button. Append real output as checked sentence-sized units arrive; do not add a simulated typewriter delay or claim that a person is thinking. Additional full-response review can delay visible output when required. Interrupted replies remain visibly marked and do not silently disappear. Preserve the user's draft and scroll position on errors. When reading older messages, show a "New reply" affordance rather than forcing the view to the bottom.
-
-Speech-to-text input is proposed pending clarification. Add a labeled microphone control, permission-denied state, visible recording status, stop/cancel, and an editable transcript preview in the composer. Silence does not submit a message. Typing remains available. Model output stays text-only at launch; future speech playback is an explicit control with its own stop action and remote-provider disclosure.
-
-### Your notes
-
-The notebook contains short takeaways, topics to return to, and agreed next steps, separate from internal memory. Update it after a completed reply with a subtle "Updating notes" or "Notes updated" state. Note generation must not steal keyboard focus, open a panel automatically, or animate the transcript.
-
-Each generated item links to visible conversation evidence. Distinguish suggested actions from agreed actions. Users can edit, dismiss, and delete notes; a later model update cannot overwrite their edits. Show failed updates with a retry action while preserving previous notes. An empty patch produces no distracting notification.
-
-### Connection setup
-
-First-run flow is vault setup, local or remote model choice, connection test, a brief privacy explanation, then conversation. Advanced fields live in connection settings. The choice must explain whether messages leave the device before the user begins sharing.
-
-Show a human-readable status such as "On this device," "Remote provider," or "Execution location unverified." Include the selected provider in settings and in a compact connection detail popover. A green dot alone is insufficient. A failed connection offers a specific retry or setup action, not an empty composer.
-
-### Session history and schedule
-
-Use a chronological list with dates and user-editable titles. Start with neutral titles such as "Sunday conversation"; generating revealing titles requires a deliberate preference. Search appears only when history warrants it. The schedule is a simple list of upcoming sessions with timezone and reminder availability, not a calendar dashboard by default.
-
-State whether reminders require the app to remain open or in the tray. A missed session has no streak penalty, red shame indicator, or guilt message.
-
-### Remembered context
-
-Show understandable statements grouped by people, events, preferences, and goals, with a source date and "Correct" or "Forget" actions. This is a curated user-facing view, not the raw internal graph. State that the app also maintains internal links and tentative interpretations. Do not imply this screen exposes every internal record.
-
-Correction edits meaning with context. Forgetting explains whether the transcript is retained, which derived records will be removed, and what happens to backups. Memory-off and private-session controls remain visible while active.
-
-An Obsidian-style force graph is not a v1 user screen under the proposed hidden-graph requirement. A future developer visualization uses synthetic fixtures by default and is never shipped as an unnoticed backdoor into personal data.
-
-### Support, dialogs, and settings
-
-Urgent support is always reachable from the app menu and works without inference. When relevant, display a calm, readable panel with verified resources and clear actions. Avoid flashing banners, danger animations, or language implying emergency monitoring.
-
-Dialogs trap focus, restore it on dismissal, and explain the consequence of destructive actions. Escape dismisses ordinary dialogs; destructive work does not begin on an accidental keypress. Settings group model connection, privacy and vault, memory, reminders, appearance, and about/update controls.
-
-### Motion and accessibility
-
-Use immediate feedback for send, stop, typing, selection, and frequently used navigation. Hover and focus may use at most 120ms color or opacity transitions. A settings drawer can enter over 180ms with `cubic-bezier(0.2, 0, 0, 1)`, using opacity and a small translation. No character-by-character text animation, routine entrance stagger, or looping breathing ornament.
-
-Transitions must be interruptible and specify their properties. Respect reduced motion with instant layout/state changes and static feedback. Do not animate the transcript to create a feeling of a human presence.
-
-All actions need keyboard access and visible focus. Batch streamed text into coherent announcements through a restrained live region, never announce each token, and prevent duplicate announcements when a response completes. Test VoiceOver and NVDA, selected history items, notebook edits, recording state, dialogs, validation, 200% zoom, text resizing, and reduced motion. Keep icons labeled and status understandable without color.
-
-## Do's and Don'ts
-
-- Give the conversation most of the window. Keep management controls quiet but discoverable.
-- Use plain descriptions of privacy and execution location at the moment a user chooses a provider.
-- Make correction, forgetting, stop, and lock easy to find.
-- Design empty, loading, unavailable-model, interrupted-response, locked, and corrupted-vault states as carefully as the happy path.
-- Avoid engagement scores, streaks, inferred mood charts, personality labels, neon gradients, and decorative graph backgrounds.
-- Do not describe the model as waiting for, missing, diagnosing, or secretly understanding the user.
-- Validate the main flow on both operating systems before treating this proposal as a finished visual system.
+Browser checks do not establish native macOS or Windows accessibility. Native webview, keyboard, screen-reader, 200% zoom, and platform title-bar validation remain required before release.

@@ -1,0 +1,43 @@
+[package]
+name = "openmind"
+version = "0.1.0"
+description = "Openmind experimental desktop application"
+edition = "2021"
+publish = false
+
+[lib]
+name = "openmind_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "openmind"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-build"]
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true, features = [] }
+
+[dependencies]
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+fs2 = "0.4"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", optional = true, features = [] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net", "io-util", "process"] }
+tokio-util = "0.7"
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = { version = "1", features = ["derive"] }
+
+tempfile = "3"

@@ -1,6 +1,6 @@
 # Turn processing, notes, and speech
 
-Proposed architecture, September 7, 2026. Krish requires three results from input: internal note updates, a response, and user-facing note updates. This document proposes execution order and optimization. It is not implemented or benchmarked.
+Proposed architecture, September 7, 2026. Krish requires three results from input: internal note updates, a response, and user-facing note updates. This document proposes execution order and optimization. The [desktop preview](prototype.md) now implements the initial reply-then-structured-notes path. The full scheduling, graph reconciliation, and clinical output-review design below remains proposed and unbenchmarked.
 
 ## Two calls for three results
 
