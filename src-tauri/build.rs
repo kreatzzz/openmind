@@ -16,6 +16,7 @@ fn main() {
             "lock_vault",
             "list_sessions",
             "create_session",
+            "update_session",
             "delete_session",
             "list_messages",
             "list_models",

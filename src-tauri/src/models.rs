@@ -10,6 +10,12 @@ pub struct Session {
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Revision for optimistic session-title and branch-setting updates.
+    pub revision: i64,
+    /// Whether this conversation may retrieve and create internal memories.
+    pub memory_enabled: bool,
+    /// Whether this conversation may derive and update user notebook notes.
+    pub notes_enabled: bool,
 }
 
 impl fmt::Debug for Session {
@@ -19,6 +25,9 @@ impl fmt::Debug for Session {
             .field("id", &self.id)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
+            .field("revision", &self.revision)
+            .field("memory_enabled", &self.memory_enabled)
+            .field("notes_enabled", &self.notes_enabled)
             .finish_non_exhaustive()
     }
 }

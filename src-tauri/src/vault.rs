@@ -30,7 +30,7 @@ pub const MAX_ASSISTANT_CHUNK_CHARS: usize = 32_000;
 pub const MAX_ASSISTANT_MESSAGE_CHARS: usize = 200_000;
 pub const MAX_SESSION_TITLE_CHARS: usize = 120;
 
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 const DB_KEY_LENGTH: usize = 32;
 const ENVELOPE_SALT_LENGTH: usize = 16;
 const ENVELOPE_NONCE_LENGTH: usize = 24;
@@ -59,6 +59,8 @@ pub enum VaultError {
     InvalidPassphrase,
     InvalidInput(&'static str),
     SessionNotFound,
+    SessionRevisionConflict,
+    SessionWorkActive,
     MessageNotFound,
     MessageNotStreaming,
     AssistantAlreadyStreaming,
@@ -94,6 +96,10 @@ impl fmt::Display for VaultError {
             Self::InvalidPassphrase => formatter.write_str("invalid passphrase"),
             Self::InvalidInput(reason) => write!(formatter, "invalid input: {reason}"),
             Self::SessionNotFound => formatter.write_str("session not found"),
+            Self::SessionRevisionConflict => formatter.write_str("session revision conflict"),
+            Self::SessionWorkActive => {
+                formatter.write_str("conversation settings cannot change during active work")
+            }
             Self::MessageNotFound => formatter.write_str("message not found"),
             Self::MessageNotStreaming => formatter.write_str("message is not streaming"),
             Self::AssistantAlreadyStreaming => formatter.write_str("a reply is already streaming"),
@@ -284,7 +290,8 @@ impl Vault {
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, title, created_at, updated_at
+            "SELECT id, title, created_at, updated_at, revision,
+                    memory_enabled, notes_enabled
              FROM sessions
              ORDER BY updated_at DESC, rowid DESC",
         )?;
@@ -311,21 +318,90 @@ impl Vault {
             title: title.to_owned(),
             created_at: timestamp.clone(),
             updated_at: timestamp.clone(),
+            revision: 1,
+            memory_enabled: true,
+            notes_enabled: true,
         };
 
         let transaction = self.connection.transaction()?;
         transaction.execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO sessions
+                 (id, title, created_at, updated_at, revision, memory_enabled, notes_enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session.id,
                 session.title,
                 session.created_at,
-                session.updated_at
+                session.updated_at,
+                session.revision,
+                session.memory_enabled as i64,
+                session.notes_enabled as i64,
             ],
         )?;
         transaction.commit()?;
         Ok(session)
+    }
+
+    /// Read one session, including its persisted branch permissions.
+    pub fn get_session(&self, session_id: &str) -> Result<Session> {
+        let session_id = canonical_id(session_id, "session ID")?;
+        session_from_id(&self.connection, &session_id)
+    }
+
+    /// Rename a conversation and update its independent derivation branches.
+    /// The revision check and branch revocation happen in one transaction. A
+    /// disabled branch is never re-enabled on an older pending job when the
+    /// session is later turned back on.
+    pub fn update_session(
+        &mut self,
+        session_id: &str,
+        title: &str,
+        memory_enabled: bool,
+        notes_enabled: bool,
+        expected_revision: i64,
+    ) -> Result<Session> {
+        let session_id = canonical_id(session_id, "session ID")?;
+        validate_text(title, MAX_SESSION_TITLE_CHARS, "session title")?;
+        validate_session_revision(expected_revision)?;
+
+        let transaction = self.connection.transaction()?;
+        let existing = session_from_id(&transaction, &session_id)?;
+        ensure_session_settings_idle(&transaction, &session_id)?;
+        if existing.revision != expected_revision {
+            return Err(VaultError::SessionRevisionConflict);
+        }
+
+        let timestamp = now_rfc3339();
+        // Jobs that have not produced output yet must retain the permission
+        // snapshot from submission. Turning a branch off revokes that branch
+        // for pending and failed jobs; a later ON update never restores it.
+        if !memory_enabled {
+            revoke_job_branch(&transaction, &session_id, "memory_enabled", &timestamp)?;
+        }
+        if !notes_enabled {
+            revoke_job_branch(&transaction, &session_id, "notes_enabled", &timestamp)?;
+        }
+
+        let changed = transaction.execute(
+            "UPDATE sessions
+             SET title = ?1, memory_enabled = ?2, notes_enabled = ?3,
+                 revision = revision + 1, updated_at = ?4
+             WHERE id = ?5 AND revision = ?6",
+            params![
+                title,
+                memory_enabled as i64,
+                notes_enabled as i64,
+                timestamp,
+                session_id,
+                expected_revision,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(VaultError::SessionRevisionConflict);
+        }
+        let updated = session_from_id(&transaction, &session_id)?;
+        transaction.commit()?;
+        Ok(updated)
     }
 
     /// Delete a session and all encrypted records that belong to it.
@@ -600,6 +676,32 @@ impl Vault {
         Ok(())
     }
 
+    /// Report whether a pending or failed job still has at least one output
+    /// branch enabled. This read lets the engine avoid provider authorization
+    /// and network setup when both branches were disabled at submission.
+    pub fn notes_call_required(&self, assistant_id: &str) -> Result<bool> {
+        let (memory_enabled, notes_enabled) = self.notes_permissions(assistant_id)?;
+        Ok(memory_enabled || notes_enabled)
+    }
+
+    /// Return the immutable branch snapshot stored with a source job.
+    pub fn notes_permissions(&self, assistant_id: &str) -> Result<(bool, bool)> {
+        let assistant_id = canonical_id(assistant_id, "assistant message ID")?;
+        let permissions: Option<(i64, i64)> = self
+            .connection
+            .query_row(
+                "SELECT memory_enabled, notes_enabled
+                 FROM notes_jobs WHERE assistant_message_id = ?1",
+                [&assistant_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((memory_enabled, notes_enabled)) = permissions else {
+            return Err(VaultError::NotesJobNotFound);
+        };
+        Ok((db_bool(memory_enabled)?, db_bool(notes_enabled)?))
+    }
+
     /// Claim the structured derivation job for a completed assistant turn and
     /// return the exact persisted user/assistant pair it may cite.
     pub fn begin_notes(&mut self, assistant_id: &str) -> Result<NotesInput> {
@@ -617,14 +719,17 @@ impl Vault {
             return Err(VaultError::MemorySourceForgotten);
         }
 
-        let status: String = transaction
+        let (status, memory_enabled, notes_enabled): (String, i64, i64) = transaction
             .query_row(
-                "SELECT status FROM notes_jobs WHERE assistant_message_id = ?1",
+                "SELECT status, memory_enabled, notes_enabled
+                 FROM notes_jobs WHERE assistant_message_id = ?1",
                 [&assistant_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?
             .ok_or(VaultError::NotesJobNotFound)?;
+        let memory_enabled = db_bool(memory_enabled)?;
+        let notes_enabled = db_bool(notes_enabled)?;
         match status.as_str() {
             "pending" | "failed" => {}
             "running" => return Err(VaultError::NotesJobAlreadyRunning),
@@ -646,7 +751,28 @@ impl Vault {
             assistant_id,
             user,
             assistant,
+            memory_enabled,
+            notes_enabled,
         })
+    }
+
+    /// Mark a claimed job complete when both output branches were disabled at
+    /// submission or durably revoked before a retry. No provider output is
+    /// accepted or written for this path.
+    pub fn complete_notes_without_writes(&mut self, assistant_id: &str) -> Result<()> {
+        let assistant_id = canonical_id(assistant_id, "assistant message ID")?;
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE notes_jobs
+             SET status = 'complete', updated_at = ?1
+             WHERE assistant_message_id = ?2 AND status = 'running'",
+            params![now_rfc3339(), assistant_id],
+        )?;
+        if changed != 1 {
+            return Err(VaultError::NotesAlreadyComplete);
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Mark an in-flight derivation failed so it can be explicitly retried.
@@ -697,14 +823,17 @@ impl Vault {
         if memory_source_is_excluded(&transaction, &user.id)? {
             return Err(VaultError::MemorySourceForgotten);
         }
-        let status: String = transaction
+        let (status, memory_enabled, notes_enabled): (String, i64, i64) = transaction
             .query_row(
-                "SELECT status FROM notes_jobs WHERE assistant_message_id = ?1",
+                "SELECT status, memory_enabled, notes_enabled
+                 FROM notes_jobs WHERE assistant_message_id = ?1",
                 [&assistant_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?
             .ok_or(VaultError::NotesJobNotFound)?;
+        let memory_enabled = db_bool(memory_enabled)?;
+        let notes_enabled = db_bool(notes_enabled)?;
         match status.as_str() {
             "running" => {}
             "complete" => return Err(VaultError::NotesAlreadyComplete),
@@ -716,42 +845,46 @@ impl Vault {
         validate_patch_evidence(patch, &user.content)?;
 
         let timestamp = now_rfc3339();
-        for candidate in &patch.memories {
-            transaction.execute(
-                "INSERT INTO memory_records
-                 (id, session_id, source_message_id, assistant_message_id,
-                  kind, content, evidence_quote, evidence_state, revision,
-                  edited, deleted, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'user_reported',
-                         1, 0, 0, ?8, ?8)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    user.session_id,
-                    user.id,
-                    assistant_id,
-                    candidate.kind.as_db_value(),
-                    candidate.content,
-                    candidate.evidence_quote,
-                    timestamp,
-                ],
-            )?;
+        if memory_enabled {
+            for candidate in &patch.memories {
+                transaction.execute(
+                    "INSERT INTO memory_records
+                     (id, session_id, source_message_id, assistant_message_id,
+                      kind, content, evidence_quote, evidence_state, revision,
+                      edited, deleted, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'user_reported',
+                             1, 0, 0, ?8, ?8)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        user.session_id,
+                        user.id,
+                        assistant_id,
+                        candidate.kind.as_db_value(),
+                        candidate.content,
+                        candidate.evidence_quote,
+                        timestamp,
+                    ],
+                )?;
+            }
         }
-        for candidate in &patch.notes {
-            transaction.execute(
-                "INSERT INTO user_notes
-                 (id, session_id, source_message_id, kind, content,
-                  evidence_quote, revision, edited, deleted, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 0, 0, ?7, ?7)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    user.session_id,
-                    user.id,
-                    candidate.kind.as_db_value(),
-                    candidate.content,
-                    candidate.evidence_quote,
-                    timestamp,
-                ],
-            )?;
+        if notes_enabled {
+            for candidate in &patch.notes {
+                transaction.execute(
+                    "INSERT INTO user_notes
+                     (id, session_id, source_message_id, kind, content,
+                      evidence_quote, revision, edited, deleted, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 0, 0, ?7, ?7)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        user.session_id,
+                        user.id,
+                        candidate.kind.as_db_value(),
+                        candidate.content,
+                        candidate.evidence_quote,
+                        timestamp,
+                    ],
+                )?;
+            }
         }
         let changed = transaction.execute(
             "UPDATE notes_jobs
@@ -829,14 +962,20 @@ impl Vault {
         validate_text(content, MAX_USER_MESSAGE_CHARS, "user message")?;
 
         let transaction = self.connection.transaction()?;
-        ensure_session(&transaction, &session_id)?;
+        let session = session_from_id(&transaction, &session_id)?;
         ensure_no_active_assistant(&transaction, &session_id)?;
 
         let user = new_user_message(&session_id, content);
         let assistant = new_assistant_message(&session_id);
         insert_message(&transaction, &user)?;
         insert_message(&transaction, &assistant)?;
-        insert_notes_job(&transaction, &assistant.id, &assistant.created_at)?;
+        insert_notes_job(
+            &transaction,
+            &assistant.id,
+            &assistant.created_at,
+            session.memory_enabled,
+            session.notes_enabled,
+        )?;
         touch_session(&transaction, &session_id, &assistant.created_at)?;
         transaction.commit()?;
         Ok((user, assistant))
@@ -984,12 +1123,44 @@ fn new_assistant_message(session_id: &str) -> Message {
 }
 
 fn session_from_row(row: &Row<'_>) -> rusqlite::Result<Session> {
+    let revision: i64 = row.get(4)?;
+    if revision < 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     Ok(Session {
         id: row.get(0)?,
         title: row.get(1)?,
         created_at: row.get(2)?,
         updated_at: row.get(3)?,
+        revision,
+        memory_enabled: db_bool_from_row(row, 5)?,
+        notes_enabled: db_bool_from_row(row, 6)?,
     })
+}
+
+fn session_from_id(connection: &Connection, session_id: &str) -> Result<Session> {
+    connection
+        .query_row(
+            "SELECT id, title, created_at, updated_at, revision,
+                    memory_enabled, notes_enabled
+             FROM sessions WHERE id = ?1",
+            [session_id],
+            session_from_row,
+        )
+        .optional()?
+        .ok_or(VaultError::SessionNotFound)
+}
+
+fn db_bool_from_row(row: &Row<'_>, index: usize) -> rusqlite::Result<bool> {
+    db_bool(row.get(index)?)
+}
+
+fn db_bool(value: i64) -> rusqlite::Result<bool> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 
 fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
@@ -1044,12 +1215,20 @@ fn insert_notes_job(
     transaction: &Transaction<'_>,
     assistant_id: &str,
     timestamp: &str,
+    memory_enabled: bool,
+    notes_enabled: bool,
 ) -> Result<()> {
     transaction.execute(
         "INSERT INTO notes_jobs
-         (assistant_message_id, status, created_at, updated_at)
-         VALUES (?1, 'pending', ?2, ?2)",
-        params![assistant_id, timestamp],
+         (assistant_message_id, status, created_at, updated_at,
+          memory_enabled, notes_enabled)
+         VALUES (?1, 'pending', ?2, ?2, ?3, ?4)",
+        params![
+            assistant_id,
+            timestamp,
+            memory_enabled as i64,
+            notes_enabled as i64
+        ],
     )?;
     Ok(())
 }
@@ -1185,6 +1364,13 @@ fn validate_revision(revision: i64) -> Result<()> {
     Ok(())
 }
 
+fn validate_session_revision(revision: i64) -> Result<()> {
+    if revision < 1 {
+        return Err(VaultError::InvalidInput("session revision"));
+    }
+    Ok(())
+}
+
 fn validate_patch_shape(patch: &NotePatch) -> Result<()> {
     patch
         .validate_shape()
@@ -1221,7 +1407,7 @@ fn memory_context_line(
             evidence_quote
         ),
         MemoryEvidenceState::UserConfirmed => format!(
-            "[user-corrected] {}: {} (original evidence: \"{}\")\n",
+            "[user-corrected] {}: {} (supersedes original evidence: \"{}\")\n",
             memory_kind_label(kind),
             content,
             evidence_quote
@@ -1281,6 +1467,60 @@ fn ensure_no_active_assistant(connection: &Connection, session_id: &str) -> Resu
     } else {
         Ok(())
     }
+}
+
+fn ensure_session_settings_idle(connection: &Connection, session_id: &str) -> Result<()> {
+    let active_reply: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM messages
+             WHERE session_id = ?1 AND role = 'assistant' AND status = 'streaming'
+             LIMIT 1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if active_reply.is_some() {
+        return Err(VaultError::SessionWorkActive);
+    }
+
+    let active_notes: Option<i64> = connection
+        .query_row(
+            "SELECT 1
+             FROM notes_jobs
+             JOIN messages ON messages.id = notes_jobs.assistant_message_id
+             WHERE messages.session_id = ?1 AND notes_jobs.status = 'running'
+             LIMIT 1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if active_notes.is_some() {
+        return Err(VaultError::SessionWorkActive);
+    }
+    Ok(())
+}
+
+fn revoke_job_branch(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+    branch: &str,
+    timestamp: &str,
+) -> Result<()> {
+    // `branch` is selected only from the two hard-coded call sites above; it
+    // is never derived from user input. Updating the snapshot rather than
+    // merely hiding a job makes revocation survive a lock, restart, and later
+    // session re-enable.
+    let query = format!(
+        "UPDATE notes_jobs
+         SET {branch} = 0, updated_at = ?1
+         WHERE status IN ('pending', 'failed')
+           AND assistant_message_id IN (
+               SELECT id FROM messages
+               WHERE session_id = ?2 AND role = 'assistant'
+           )"
+    );
+    transaction.execute(&query, params![timestamp, session_id])?;
+    Ok(())
 }
 
 fn touch_session(connection: &Connection, session_id: &str, timestamp: &str) -> Result<()> {
@@ -1353,7 +1593,10 @@ fn initialize_schema(connection: &Connection) -> Result<()> {
              id TEXT PRIMARY KEY NOT NULL,
              title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND {MAX_SESSION_TITLE_CHARS}),
              created_at TEXT NOT NULL,
-             updated_at TEXT NOT NULL
+             updated_at TEXT NOT NULL,
+             revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+             memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+             notes_enabled INTEGER NOT NULL DEFAULT 1 CHECK (notes_enabled IN (0, 1))
          );
          CREATE TABLE messages (
              id TEXT PRIMARY KEY NOT NULL,
@@ -1381,6 +1624,8 @@ fn notes_schema_sql() -> String {
              status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'complete', 'failed')),
              created_at TEXT NOT NULL,
              updated_at TEXT NOT NULL,
+             memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
+             notes_enabled INTEGER NOT NULL DEFAULT 1 CHECK (notes_enabled IN (0, 1)),
              FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
          );
          CREATE INDEX notes_jobs_status_idx ON notes_jobs (status, updated_at);
@@ -1461,6 +1706,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         1 => {
             let transaction = connection.unchecked_transaction()?;
             transaction.execute_batch(&notes_schema_sql())?;
+            add_session_settings(&transaction)?;
             transaction.execute(
                 "INSERT INTO notes_jobs
                  (assistant_message_id, status, created_at, updated_at)
@@ -1500,6 +1746,16 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                          ON memory_exclusions (scope, created_at);",
                 memory_records = memory_records_table_sql(),
             ))?;
+            add_session_settings(&transaction)?;
+            add_notes_job_settings(&transaction)?;
+            transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            transaction.commit()?;
+            Ok(())
+        }
+        3 => {
+            let transaction = connection.unchecked_transaction()?;
+            add_session_settings(&transaction)?;
+            add_notes_job_settings(&transaction)?;
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             transaction.commit()?;
             Ok(())
@@ -1507,6 +1763,28 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         version if version == SCHEMA_VERSION as i64 => Ok(()),
         _ => Err(VaultError::CorruptDatabase),
     }
+}
+
+fn add_session_settings(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(
+        "ALTER TABLE sessions
+             ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1);
+         ALTER TABLE sessions
+             ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1));
+         ALTER TABLE sessions
+             ADD COLUMN notes_enabled INTEGER NOT NULL DEFAULT 1 CHECK (notes_enabled IN (0, 1));",
+    )?;
+    Ok(())
+}
+
+fn add_notes_job_settings(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(
+        "ALTER TABLE notes_jobs
+             ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1));
+         ALTER TABLE notes_jobs
+             ADD COLUMN notes_enabled INTEGER NOT NULL DEFAULT 1 CHECK (notes_enabled IN (0, 1));",
+    )?;
+    Ok(())
 }
 
 fn finalize_new_database(connection: &Connection) -> Result<()> {
@@ -2014,6 +2292,9 @@ mod tests {
                  DROP TABLE memory_exclusions;
                  DROP TABLE user_notes;
                  DROP TABLE notes_jobs;
+                 ALTER TABLE sessions DROP COLUMN notes_enabled;
+                 ALTER TABLE sessions DROP COLUMN memory_enabled;
+                 ALTER TABLE sessions DROP COLUMN revision;
                  PRAGMA user_version = 1;",
             )
             .expect("make schema one fixture");
@@ -2027,7 +2308,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert!(migrated.list_notes().expect("notes").is_empty());
     }
 
@@ -2039,13 +2320,18 @@ mod tests {
         let (user, assistant) = finish_synthetic_turn(
             &mut vault,
             &session.id,
-            "I want to reconnect with a synthetic friend.",
+            "I miss my friends and want to reconnect.",
         );
         vault
             .connection
             .execute_batch(
                 "DROP TABLE memory_exclusions;
                  DROP TABLE memory_records;
+                 ALTER TABLE notes_jobs DROP COLUMN notes_enabled;
+                 ALTER TABLE notes_jobs DROP COLUMN memory_enabled;
+                 ALTER TABLE sessions DROP COLUMN notes_enabled;
+                 ALTER TABLE sessions DROP COLUMN memory_enabled;
+                 ALTER TABLE sessions DROP COLUMN revision;
                  CREATE TABLE memory_records (
                      id TEXT PRIMARY KEY NOT NULL,
                      session_id TEXT NOT NULL,
@@ -2118,7 +2404,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -2138,6 +2424,9 @@ mod tests {
                  DROP TABLE memory_exclusions;
                  DROP TABLE user_notes;
                  DROP TABLE notes_jobs;
+                 ALTER TABLE sessions DROP COLUMN notes_enabled;
+                 ALTER TABLE sessions DROP COLUMN memory_enabled;
+                 ALTER TABLE sessions DROP COLUMN revision;
                  PRAGMA user_version = 1;",
             )
             .expect("make schema one fixture");
@@ -2157,6 +2446,75 @@ mod tests {
         assert_eq!(status, "failed");
         let input = migrated.begin_notes(&assistant.id).expect("claim backfill");
         assert_eq!(input.assistant.id, assistant.id);
+    }
+
+    #[test]
+    fn migrates_schema_three_settings_without_losing_exclusions() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let (user, assistant) = finish_synthetic_turn(
+            &mut vault,
+            &session.id,
+            "I miss my friends and want to reconnect.",
+        );
+        vault.begin_notes(&assistant.id).expect("claim");
+        vault
+            .apply_notes(&assistant.id, &synthetic_patch())
+            .expect("apply");
+        let memory = vault
+            .list_memories()
+            .expect("memories")
+            .pop()
+            .expect("memory");
+        vault
+            .delete_memory(&memory.id, memory.revision)
+            .expect("forget source");
+
+        // Recreate the actual v3 shape from the fresh v4 fixture. The
+        // remembered-context exclusion table and tombstones must survive the
+        // settings-only migration unchanged.
+        vault
+            .connection
+            .execute_batch(
+                "ALTER TABLE notes_jobs DROP COLUMN notes_enabled;
+                 ALTER TABLE notes_jobs DROP COLUMN memory_enabled;
+                 ALTER TABLE sessions DROP COLUMN notes_enabled;
+                 ALTER TABLE sessions DROP COLUMN memory_enabled;
+                 ALTER TABLE sessions DROP COLUMN revision;
+                 PRAGMA user_version = 3;",
+            )
+            .expect("make schema three fixture");
+        drop(vault);
+
+        let migrated = Vault::open(directory.path(), "synthetic passphrase").expect("migrate");
+        let persisted = migrated
+            .list_sessions()
+            .expect("sessions")
+            .pop()
+            .expect("persisted session");
+        assert_eq!(persisted.id, session.id);
+        assert_eq!(persisted.revision, 1);
+        assert!(persisted.memory_enabled);
+        assert!(persisted.notes_enabled);
+        assert!(migrated.list_memories().expect("memories").is_empty());
+        assert!(migrated
+            .list_context_messages(&session.id)
+            .expect("context")
+            .iter()
+            .all(|message| message.id != user.id && message.id != assistant.id));
+        let exclusions: i64 = migrated
+            .connection
+            .query_row("SELECT count(*) FROM memory_exclusions", [], |row| {
+                row.get(0)
+            })
+            .expect("exclusion count");
+        assert_eq!(exclusions, 1);
+        let version: i64 = migrated
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, 4);
     }
 
     #[test]

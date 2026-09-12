@@ -117,6 +117,7 @@ async fn update_notes(
     connection: &Connection,
     on_event: &Channel<TurnEvent>,
 ) -> Result<(), String> {
+    let job_permissions = engine.notes_permissions(&message_id).ok();
     let prepared = match engine.prepare_notes_with_provider(
         &message_id,
         connection.provider,
@@ -126,8 +127,10 @@ async fn update_notes(
         Ok(None) => {
             let _ = on_event.send(TurnEvent::Notes {
                 message_id,
-                status: NotesStatus::Complete,
+                status: NotesStatus::Skipped,
                 message: None,
+                memory_enabled: job_permissions.map(|permissions| permissions.0),
+                notes_enabled: job_permissions.map(|permissions| permissions.1),
             });
             return Ok(());
         }
@@ -136,6 +139,8 @@ async fn update_notes(
                 message_id,
                 status: NotesStatus::Failed,
                 message: Some(error.clone()),
+                memory_enabled: job_permissions.map(|permissions| permissions.0),
+                notes_enabled: job_permissions.map(|permissions| permissions.1),
             });
             return Err(error);
         }
@@ -150,11 +155,25 @@ async fn execute_notes(
     connection: &Connection,
     on_event: &Channel<TurnEvent>,
 ) -> Result<(), String> {
+    if prepared.skipped {
+        on_event
+            .send(TurnEvent::Notes {
+                message_id,
+                status: NotesStatus::Skipped,
+                message: None,
+                memory_enabled: Some(prepared.input.memory_enabled),
+                notes_enabled: Some(prepared.input.notes_enabled),
+            })
+            .map_err(|_| "The notebook window disconnected.".to_owned())?;
+        return Ok(());
+    }
     if on_event
         .send(TurnEvent::Notes {
             message_id: message_id.clone(),
             status: NotesStatus::Updating,
             message: None,
+            memory_enabled: Some(prepared.input.memory_enabled),
+            notes_enabled: Some(prepared.input.notes_enabled),
         })
         .is_err()
     {
@@ -192,6 +211,8 @@ async fn execute_notes(
                 message_id,
                 status,
                 message,
+                memory_enabled: Some(prepared.input.memory_enabled),
+                notes_enabled: Some(prepared.input.notes_enabled),
             });
         }
         Ok(None) => (),
@@ -200,6 +221,8 @@ async fn execute_notes(
                 message_id,
                 status: NotesStatus::Failed,
                 message: Some(error),
+                memory_enabled: Some(prepared.input.memory_enabled),
+                notes_enabled: Some(prepared.input.notes_enabled),
             });
         }
     }
@@ -255,6 +278,27 @@ async fn list_sessions(state: State<'_, DesktopState>) -> Result<Vec<Session>, S
 #[tauri::command]
 async fn create_session(state: State<'_, DesktopState>) -> Result<Session, String> {
     blocking(&state, Engine::create_session).await
+}
+
+#[tauri::command]
+async fn update_session(
+    state: State<'_, DesktopState>,
+    id: String,
+    title: String,
+    memory_enabled: bool,
+    notes_enabled: bool,
+    expected_revision: i64,
+) -> Result<Session, String> {
+    blocking(&state, move |engine| {
+        engine.update_session(
+            &id,
+            &title,
+            memory_enabled,
+            notes_enabled,
+            expected_revision,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -437,17 +481,23 @@ async fn send_message(
                     .await;
                 }
                 Ok(None) => {
+                    let job_permissions = engine.notes_permissions(&message_id).ok();
                     let _ = on_event.send(TurnEvent::Notes {
                         message_id: message_id.clone(),
-                        status: NotesStatus::Complete,
+                        status: NotesStatus::Skipped,
                         message: None,
+                        memory_enabled: job_permissions.map(|permissions| permissions.0),
+                        notes_enabled: job_permissions.map(|permissions| permissions.1),
                     });
                 }
                 Err(error) => {
+                    let job_permissions = engine.notes_permissions(&message_id).ok();
                     let _ = on_event.send(TurnEvent::Notes {
                         message_id: message_id.clone(),
                         status: NotesStatus::Failed,
                         message: Some(error),
+                        memory_enabled: job_permissions.map(|permissions| permissions.0),
+                        notes_enabled: job_permissions.map(|permissions| permissions.1),
                     });
                 }
             }
@@ -485,6 +535,7 @@ pub fn run() {
             lock_vault,
             list_sessions,
             create_session,
+            update_session,
             delete_session,
             list_messages,
             list_models,
