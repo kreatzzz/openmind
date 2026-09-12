@@ -9,3 +9,7 @@ Use synthetic personal histories in examples and tests. Never commit real conver
 Use Bun for frontend tooling and Cargo for Rust, as configured in the repository. Do not start development servers unless requested. Follow the user's skill requirements, including `vercel-react-best-practices` for React work.
 
 Do not describe hidden memory as inaccessible to the device owner, or describe AI support as established clinical treatment. Preserve evidence, correction, deletion, and explicit remote-provider consent in architectural changes.
+
+## Git workflow
+
+Work on a feature branch and submit changes through a pull request. Never push directly to `main`, force-push it, or bypass its protections. The active GitHub ruleset requires pull requests, resolved review threads, and passing macOS and Windows desktop checks before merging.

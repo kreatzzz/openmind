@@ -1,6 +1,6 @@
 # Privacy and security design
 
-Status: proposed threat model and controls. Nothing in this document describes implemented or audited encryption.
+Status: proposed threat model and full-product controls. The [desktop prototype](prototype.md) implements a subset, including an encrypted vault; those controls have not received an independent security audit.
 
 ## The model-only memory constraint
 

@@ -21,6 +21,9 @@
     "allow-list-notes",
     "allow-edit-note",
     "allow-delete-note",
+    "allow-list-memories",
+    "allow-edit-memory",
+    "allow-delete-memory",
     "allow-retry-notes",
     "allow-delete-session"
   ]

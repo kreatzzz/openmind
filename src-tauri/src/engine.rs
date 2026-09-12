@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     models::{Message, MessageRole, MessageStatus, Session},
-    notes::{NotePatch, NotesInput, UserNote},
+    notes::{MemoryRecord, NotePatch, NotesInput, UserNote},
     vault::Vault,
 };
 
@@ -315,7 +315,7 @@ impl Engine {
         }
         let vault = state.vault.as_mut().ok_or("Unlock your vault first.")?;
         let mut history = vault
-            .list_messages(session_id)
+            .list_context_messages(session_id)
             .map_err(|error| error.to_string())?;
         let memory = vault
             .memory_context(1_000)
@@ -400,6 +400,46 @@ impl Engine {
             .as_ref()
             .ok_or("Unlock your vault first.")?
             .list_notes()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn list_memories(&self) -> Result<Vec<MemoryRecord>, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .list_memories()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn edit_memory(
+        &self,
+        id: &str,
+        content: &str,
+        revision: i64,
+    ) -> Result<MemoryRecord, String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop the current operation before correcting remembered context.".into());
+        }
+        state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .edit_memory(id, content, revision)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn delete_memory(&self, id: &str, revision: i64) -> Result<(), String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop the current operation before forgetting remembered context.".into());
+        }
+        state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .delete_memory(id, revision)
             .map_err(|error| error.to_string())
     }
 
@@ -827,6 +867,94 @@ mod tests {
         assert!(engine
             .append_chunk(&next.assistant.id, "Next reply")
             .is_ok());
+    }
+
+    #[test]
+    fn memory_writes_wait_for_idle_work_and_persist_across_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+
+        let first = engine
+            .prepare_turn(&session.id, "I want to take a walk.")
+            .unwrap();
+        engine
+            .append_chunk(&first.assistant.id, "That sounds restorative.")
+            .unwrap();
+        let finished = engine
+            .finish_turn_and_prepare_notes(&first.assistant.id, MessageStatus::Complete)
+            .unwrap()
+            .unwrap();
+        let notes = finished.notes.unwrap().unwrap();
+        let patch: NotePatch = serde_json::from_value(serde_json::json!({
+            "memories": [{
+                "kind": "goal",
+                "content": "Take a walk",
+                "evidenceQuote": "I want to take a walk."
+            }],
+            "notes": []
+        }))
+        .unwrap();
+        assert!(matches!(
+            engine
+                .finish_notes(&notes.attempt_id, Some(&patch))
+                .unwrap(),
+            Some(NotesStatus::Complete)
+        ));
+        let memory = engine.list_memories().unwrap().pop().unwrap();
+
+        let second = engine
+            .prepare_turn(&session.id, "A second synthetic turn.")
+            .unwrap();
+        assert!(engine
+            .edit_memory(&memory.id, "A corrected walk goal", memory.revision)
+            .is_err());
+        assert!(engine.delete_memory(&memory.id, memory.revision).is_err());
+        engine.cancel_turn().unwrap();
+        engine
+            .finish_turn(&second.assistant.id, MessageStatus::Interrupted)
+            .unwrap();
+
+        let third = engine
+            .prepare_turn(&session.id, "A third synthetic turn.")
+            .unwrap();
+        engine
+            .append_chunk(&third.assistant.id, "A short reply.")
+            .unwrap();
+        let finished = engine
+            .finish_turn_and_prepare_notes(&third.assistant.id, MessageStatus::Complete)
+            .unwrap()
+            .unwrap();
+        let notes = finished.notes.unwrap().unwrap();
+        assert!(engine
+            .edit_memory(&memory.id, "Another corrected goal", memory.revision)
+            .is_err());
+        assert!(engine.delete_memory(&memory.id, memory.revision).is_err());
+
+        engine.lock().unwrap();
+        assert!(notes.cancel.is_cancelled());
+        assert!(engine.list_memories().is_err());
+        engine.unlock(PASSPHRASE, false).unwrap();
+        let persisted = engine.list_memories().unwrap().pop().unwrap();
+        assert_eq!(persisted.content, memory.content);
+        assert_eq!(persisted.revision, memory.revision);
+
+        engine
+            .delete_memory(&persisted.id, persisted.revision)
+            .unwrap();
+        let after_forget = engine
+            .prepare_turn(&session.id, "A fresh synthetic turn.")
+            .unwrap();
+        assert!(after_forget.history.iter().all(|message| {
+            message.id != persisted.source_message_id
+                && message.id != persisted.assistant_message_id
+        }));
+        assert!(after_forget.memory.is_empty());
+        engine.cancel_turn().unwrap();
+        engine
+            .finish_turn(&after_forget.assistant.id, MessageStatus::Interrupted)
+            .unwrap();
     }
 
     #[test]

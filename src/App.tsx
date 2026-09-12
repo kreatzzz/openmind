@@ -3,6 +3,7 @@ import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
+  Brain,
   BookOpen,
   Check,
   ChevronRight,
@@ -20,11 +21,13 @@ import { Dialog } from "./components/Dialog";
 import { Mark } from "./components/Mark";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { Notebook } from "./components/Notebook";
+import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { Transcript } from "./components/Transcript";
 import {
   desktop,
   isDesktop,
   type Message,
+  type MemoryRecord,
   type ModelInfo,
   type Session,
   type TurnEvent,
@@ -66,6 +69,15 @@ const SAMPLE_MESSAGES: Message[] = [
     status: "complete",
     createdAt: SAMPLE_SESSION.createdAt,
   },
+  {
+    id: "sample-4",
+    sessionId: "sample",
+    role: "assistant",
+    content:
+      "That feeling can make even a quiet week seem urgent. A little space may help you notice what actually needs your attention.",
+    status: "complete",
+    createdAt: SAMPLE_SESSION.createdAt,
+  },
 ];
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
@@ -82,6 +94,9 @@ export default function App() {
   const [sample, setSample] = useState(false);
   const [isDemo, setIsDemo] = useState(false);
   const [userNotes, setUserNotes] = useState<UserNote[]>([]);
+  const [memories, setMemories] = useState<MemoryRecord[]>([]);
+  const [memoryError, setMemoryError] = useState("");
+  const [memoryLoading, setMemoryLoading] = useState(false);
   const [noteStatus, setNoteStatus] = useState("");
   const [search, setSearch] = useState("");
   const [highlight, setHighlight] = useState<string | null>(null);
@@ -112,6 +127,7 @@ export default function App() {
   const [confirmation, setConfirmation] = useState("");
   const [settings, setSettings] = useState(false);
   const [notes, setNotes] = useState(false);
+  const [memoryView, setMemoryView] = useState(false);
   const [drawer, setDrawer] = useState(false);
   const [deleteConversation, setDeleteConversation] = useState(false);
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:11434");
@@ -137,10 +153,25 @@ export default function App() {
 
   async function loadSessions() {
     const request = generation.current;
-    const [list, loadedNotes] = await Promise.all([
+    setMemoryLoading(true);
+    const [sessionResult, noteResult, memoryResult] = await Promise.allSettled([
       desktop.listSessions(),
       desktop.listNotes(),
+      desktop.listMemories(),
     ]);
+    if (sessionResult.status === "rejected") throw sessionResult.reason;
+    if (noteResult.status === "rejected") throw noteResult.reason;
+    if (request !== generation.current) return;
+    const list = sessionResult.value;
+    const loadedNotes = noteResult.value;
+    if (memoryResult.status === "fulfilled") {
+      setMemories(memoryResult.value);
+      setMemoryError("");
+    } else {
+      setMemories([]);
+      setMemoryError(errorText(memoryResult.reason));
+    }
+    setMemoryLoading(false);
     const loaded = list[0] ? await desktop.listMessages(list[0].id) : [];
     if (request !== generation.current) return;
     setSessions(list);
@@ -148,6 +179,22 @@ export default function App() {
     setSelected(list[0]?.id ?? null);
     setMessages(loaded);
     setScreen("conversation");
+  }
+  async function refreshMemories() {
+    const request = generation.current;
+    setMemoryLoading(true);
+    setMemoryError("");
+    try {
+      const loaded = await desktop.listMemories();
+      if (request === generation.current) setMemories(loaded);
+    } catch (reason) {
+      if (request === generation.current) {
+        setMemoryError(errorText(reason));
+        throw reason;
+      }
+    } finally {
+      if (request === generation.current) setMemoryLoading(false);
+    }
   }
   useEffect(() => {
     if (!isDesktop) return;
@@ -238,6 +285,53 @@ export default function App() {
         updatedAt: SAMPLE_SESSION.createdAt,
       },
     ]);
+    setMemories([
+      {
+        id: "sample-memory-event",
+        sessionId: "sample",
+        sourceMessageId: "sample-1",
+        assistantMessageId: "sample-2",
+        kind: "event",
+        content:
+          "A quiet weekend made room to notice how planning follows rest.",
+        evidenceQuote:
+          "I had a quiet weekend, but by Sunday evening I was already making lists for the week.",
+        evidenceState: "user_reported",
+        revision: 1,
+        edited: false,
+        createdAt: SAMPLE_SESSION.createdAt,
+        updatedAt: SAMPLE_SESSION.createdAt,
+      },
+      {
+        id: "sample-memory-concern",
+        sessionId: "sample",
+        sourceMessageId: "sample-1",
+        assistantMessageId: "sample-2",
+        kind: "concern",
+        content: "Rest can start to feel like another task to get right.",
+        evidenceQuote:
+          "I think I turned resting into another thing to get right.",
+        evidenceState: "user_reported",
+        revision: 1,
+        edited: false,
+        createdAt: SAMPLE_SESSION.createdAt,
+        updatedAt: SAMPLE_SESSION.createdAt,
+      },
+      {
+        id: "sample-memory-goal",
+        sessionId: "sample",
+        sourceMessageId: "sample-3",
+        assistantMessageId: "sample-4",
+        kind: "goal",
+        content: "Feel a little less behind when the week is quiet.",
+        evidenceQuote: "Probably feeling a little less behind.",
+        evidenceState: "inferred",
+        revision: 1,
+        edited: false,
+        createdAt: SAMPLE_SESSION.createdAt,
+        updatedAt: SAMPLE_SESSION.createdAt,
+      },
+    ]);
     setSessions([SAMPLE_SESSION]);
     setSelected("sample");
     setMessages(SAMPLE_MESSAGES);
@@ -251,6 +345,9 @@ export default function App() {
     setIsDemo(false);
     setNotes(false);
     setUserNotes([]);
+    setMemories([]);
+    setMemoryError("");
+    setMemoryLoading(false);
     setSearch("");
     setMessages([]);
     setSessions([]);
@@ -263,6 +360,7 @@ export default function App() {
   }
   async function selectSession(id: string) {
     setNotes(false);
+    setMemoryView(false);
     if (sending || busy || id === selected) {
       setDrawer(false);
       return;
@@ -296,6 +394,7 @@ export default function App() {
       if (request !== generation.current) return;
       setSessions((current) => [item, ...current]);
       setNotes(false);
+      setMemoryView(false);
       setSelected(item.id);
       setMessages([]);
       setDraft("");
@@ -330,6 +429,9 @@ export default function App() {
       setMessages([]);
       setIsDemo(false);
       setUserNotes([]);
+      setMemories([]);
+      setMemoryError("");
+      setMemoryLoading(false);
       setSearch("");
       setNoteStatus("");
       setHighlight(null);
@@ -348,6 +450,7 @@ export default function App() {
       setAnnouncement("Vault locked.");
       setSettings(false);
       setNotes(false);
+      setMemoryView(false);
       setDeleteConversation(false);
       setDrawer(false);
       setSending(false);
@@ -373,6 +476,7 @@ export default function App() {
       if (request !== generation.current) return;
       setSessions((items) => items.filter((item) => item.id !== id));
       setUserNotes((items) => items.filter((item) => item.sessionId !== id));
+      setMemories((items) => items.filter((item) => item.sessionId !== id));
       setSelected(null);
       setMessages([]);
       setDraft("");
@@ -384,6 +488,101 @@ export default function App() {
       if (request === generation.current) setError(errorText(reason));
     } finally {
       if (request === generation.current) setBusy(false);
+    }
+  }
+  async function editMemory(memory: MemoryRecord, content: string) {
+    const request = generation.current;
+    const updated = sample
+      ? {
+          ...memory,
+          content,
+          evidenceState: "user_confirmed" as const,
+          edited: true,
+          revision: memory.revision + 1,
+        }
+      : await desktop.editMemory(memory.id, content, memory.revision);
+    if (request !== generation.current) return;
+    setMemories((items) =>
+      items.map((item) => (item.id === updated.id ? updated : item)),
+    );
+  }
+  async function forgetMemory(memory: MemoryRecord) {
+    if (sending || busy) return;
+    const request = ++generation.current;
+    setBusy(true);
+    setMemoryError("");
+    try {
+      if (sample) {
+        setMemories((items) =>
+          items.filter(
+            (item) => item.sourceMessageId !== memory.sourceMessageId,
+          ),
+        );
+        setUserNotes((items) =>
+          items.filter(
+            (item) => item.sourceMessageId !== memory.sourceMessageId,
+          ),
+        );
+      } else {
+        await desktop.deleteMemory(memory.id, memory.revision);
+        if (request !== generation.current) return;
+        setMemories((items) =>
+          items.filter(
+            (item) => item.sourceMessageId !== memory.sourceMessageId,
+          ),
+        );
+        setUserNotes((items) =>
+          items.filter(
+            (item) => item.sourceMessageId !== memory.sourceMessageId,
+          ),
+        );
+        try {
+          const [updatedMemories, updatedNotes] = await Promise.all([
+            desktop.listMemories(),
+            desktop.listNotes(),
+          ]);
+          if (request !== generation.current) return;
+          setMemories(updatedMemories);
+          setUserNotes(updatedNotes);
+        } catch (reason) {
+          if (request === generation.current)
+            setMemoryError(
+              `Remembered context was forgotten, but the list could not refresh: ${errorText(reason)}`,
+            );
+        }
+      }
+      setAnnouncement("Remembered context forgotten.");
+    } catch (reason) {
+      if (request === generation.current) {
+        setMemoryError(errorText(reason));
+        throw reason;
+      }
+    } finally {
+      if (request === generation.current) setBusy(false);
+    }
+  }
+  async function openMemorySource(memory: MemoryRecord) {
+    const request = generation.current;
+    atBottom.current = false;
+    setNewReply(false);
+    if (memory.sessionId !== selected) {
+      setBusy(true);
+      try {
+        const loaded = sample
+          ? SAMPLE_MESSAGES
+          : await desktop.listMessages(memory.sessionId);
+        if (request !== generation.current) return;
+        setSelected(memory.sessionId);
+        setMessages(loaded);
+        setDraft("");
+      } finally {
+        if (request === generation.current) setBusy(false);
+      }
+    }
+    if (request === generation.current) {
+      setNotes(false);
+      setMemoryView(false);
+      setHighlight(memory.sourceMessageId);
     }
   }
   function changeProvider(next: "ollama" | "codex") {
@@ -677,9 +876,11 @@ export default function App() {
               <button
                 key={item.id}
                 onClick={() => void selectSession(item.id)}
-                className={`session-item ${selected === item.id && !notes ? "selected" : ""}`}
+                className={`session-item ${selected === item.id && !notes && !memoryView ? "selected" : ""}`}
                 aria-current={
-                  selected === item.id && !notes ? "page" : undefined
+                  selected === item.id && !notes && !memoryView
+                    ? "page"
+                    : undefined
                 }
                 disabled={sending || busy}
               >
@@ -703,11 +904,29 @@ export default function App() {
       )}
       <div className="rail-bottom">
         <button
-          className="rail-action"
+          className={`rail-action ${memoryView ? "rail-action-selected" : ""}`}
           onClick={() => {
-            setNotes(true);
+            setMemoryView(true);
+            setNotes(false);
             setDrawer(false);
           }}
+          aria-label="Remembered context"
+          aria-current={memoryView ? "page" : undefined}
+        >
+          <Brain size={18} />
+          Remembered context
+          <span className="rail-count" aria-hidden="true">
+            {memories.length}
+          </span>
+        </button>
+        <button
+          className={`rail-action ${notes ? "rail-action-selected" : ""}`}
+          onClick={() => {
+            setNotes(true);
+            setMemoryView(false);
+            setDrawer(false);
+          }}
+          aria-current={notes ? "page" : undefined}
         >
           <BookOpen size={18} />
           Your notes
@@ -767,16 +986,24 @@ export default function App() {
                   <Menu size={20} />
                 </button>
                 <span className="header-section">
-                  {notes ? "Your notes" : "Conversation"}
+                  {memoryView
+                    ? "Remembered context"
+                    : notes
+                      ? "Your notes"
+                      : "Conversation"}
                 </span>
                 <span className="header-slash">/</span>
                 <span className="header-date">
-                  {session ? dateLabel(session.createdAt) : "A fresh page"}
+                  {memoryView
+                    ? `${memories.length} ${memories.length === 1 ? "item" : "items"}`
+                    : session
+                      ? dateLabel(session.createdAt)
+                      : "A fresh page"}
                 </span>
               </div>
               <div className="header-actions">
                 <span className="preview-badge">Engineering preview</span>
-                {!notes && selected && !sample && (
+                {!notes && !memoryView && selected && !sample && (
                   <button
                     className="icon-button"
                     aria-label="Delete conversation"
@@ -799,7 +1026,21 @@ export default function App() {
                 </button>
               </div>
             )}
-            {notes ? (
+            {memoryView ? (
+              <MemoryWorkspace
+                memories={memories}
+                notes={userNotes}
+                sessions={sessions}
+                sample={sample}
+                disabled={sending || busy}
+                loading={memoryLoading}
+                error={memoryError}
+                onRetry={sample ? undefined : refreshMemories}
+                onEdit={editMemory}
+                onDelete={forgetMemory}
+                onSource={openMemorySource}
+              />
+            ) : notes ? (
               <Notebook
                 notes={userNotes}
                 sample={sample}
@@ -847,6 +1088,7 @@ export default function App() {
                   }
                   if (request === generation.current) {
                     setNotes(false);
+                    setMemoryView(false);
                     setHighlight(note.sourceMessageId);
                   }
                 }}

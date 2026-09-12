@@ -15,8 +15,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::models::{Message, MessageRole, MessageStatus, Session};
 use crate::notes::{
-    MemoryKind, NoteKind, NotePatch, NotesInput, UserNote, MAX_CANDIDATE_CONTENT_CHARS,
-    MAX_EVIDENCE_QUOTE_CHARS,
+    MemoryEvidenceState, MemoryKind, MemoryRecord, NoteKind, NotePatch, NotesInput, UserNote,
+    MAX_CANDIDATE_CONTENT_CHARS, MAX_EVIDENCE_QUOTE_CHARS,
 };
 
 pub const DATABASE_FILE_NAME: &str = "vault.db";
@@ -30,7 +30,7 @@ pub const MAX_ASSISTANT_CHUNK_CHARS: usize = 32_000;
 pub const MAX_ASSISTANT_MESSAGE_CHARS: usize = 200_000;
 pub const MAX_SESSION_TITLE_CHARS: usize = 120;
 
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 const DB_KEY_LENGTH: usize = 32;
 const ENVELOPE_SALT_LENGTH: usize = 16;
 const ENVELOPE_NONCE_LENGTH: usize = 24;
@@ -70,6 +70,10 @@ pub enum VaultError {
     NotesAlreadyComplete,
     NotesSourceNotFound,
     InvalidNotesPatch,
+    MemoryNotFound,
+    MemoryDeleted,
+    MemorySourceForgotten,
+    MemoryRevisionConflict,
     NoteNotFound,
     NoteDeleted,
     RevisionConflict,
@@ -105,6 +109,10 @@ impl fmt::Display for VaultError {
             Self::NotesAlreadyComplete => formatter.write_str("notes job is already complete"),
             Self::NotesSourceNotFound => formatter.write_str("notes source message not found"),
             Self::InvalidNotesPatch => formatter.write_str("notes patch is invalid"),
+            Self::MemoryNotFound => formatter.write_str("memory not found"),
+            Self::MemoryDeleted => formatter.write_str("memory has been deleted"),
+            Self::MemorySourceForgotten => formatter.write_str("memory source has been forgotten"),
+            Self::MemoryRevisionConflict => formatter.write_str("memory revision conflict"),
             Self::NoteNotFound => formatter.write_str("note not found"),
             Self::NoteDeleted => formatter.write_str("note has been deleted"),
             Self::RevisionConflict => formatter.write_str("note revision conflict"),
@@ -348,6 +356,166 @@ impl Vault {
         Ok(messages)
     }
 
+    /// Return conversation context with source turns excluded by a memory
+    /// forget operation. The visible transcript remains available through
+    /// `list_messages`, while the model cannot relearn a forgotten turn.
+    pub fn list_context_messages(&self, session_id: &str) -> Result<Vec<Message>> {
+        let session_id = canonical_id(session_id, "session ID")?;
+        ensure_session(&self.connection, &session_id)?;
+
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, role, content, status, created_at
+             FROM messages
+             WHERE session_id = ?1
+               AND id NOT IN (
+                   SELECT source_message_id
+                   FROM memory_exclusions
+                   WHERE source_message_id IN (
+                       SELECT id FROM messages WHERE session_id = ?1
+                   )
+                   UNION
+                   SELECT memory_records.assistant_message_id
+                   FROM memory_records
+                   JOIN memory_exclusions
+                     ON memory_exclusions.source_message_id = memory_records.source_message_id
+                   WHERE memory_records.session_id = ?1
+               )
+             ORDER BY rowid ASC",
+        )?;
+        let mut rows = statement.query([session_id])?;
+        let mut messages = Vec::new();
+        while let Some(row) = rows.next()? {
+            messages.push(message_from_row(row)?);
+        }
+        Ok(messages)
+    }
+
+    /// Return active, source-backed remembered context records. Tombstones and
+    /// records whose source turn was forgotten are never returned.
+    pub fn list_memories(&self) -> Result<Vec<MemoryRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT memory_records.id, memory_records.session_id,
+                    memory_records.source_message_id, memory_records.assistant_message_id,
+                    memory_records.kind, memory_records.content,
+                    memory_records.evidence_quote, memory_records.evidence_state,
+                    memory_records.revision, memory_records.edited,
+                    memory_records.created_at, memory_records.updated_at
+             FROM memory_records
+             JOIN messages AS source ON source.id = memory_records.source_message_id
+             WHERE memory_records.deleted = 0
+               AND source.role = 'user'
+               AND NOT EXISTS (
+                   SELECT 1 FROM memory_exclusions
+                   WHERE memory_exclusions.source_message_id = memory_records.source_message_id
+               )
+             ORDER BY memory_records.updated_at DESC, memory_records.rowid DESC",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut memories = Vec::new();
+        while let Some(row) = rows.next()? {
+            memories.push(memory_record_from_row(row)?);
+        }
+        Ok(memories)
+    }
+
+    /// Correct a remembered record with an optimistic revision check. The
+    /// original source and quote remain attached as provenance; the record is
+    /// marked user-confirmed so retrieval does not present the correction as a
+    /// fresh model extraction.
+    pub fn edit_memory(
+        &mut self,
+        memory_id: &str,
+        content: &str,
+        expected_revision: i64,
+    ) -> Result<MemoryRecord> {
+        let memory_id = canonical_id(memory_id, "memory ID")?;
+        validate_text(content, MAX_CANDIDATE_CONTENT_CHARS, "memory content")?;
+        validate_revision(expected_revision)?;
+
+        let transaction = self.connection.transaction()?;
+        let existing = memory_with_deleted_from_id(&transaction, &memory_id)?;
+        if existing.deleted {
+            return Err(VaultError::MemoryDeleted);
+        }
+        if existing.memory.revision != expected_revision {
+            return Err(VaultError::MemoryRevisionConflict);
+        }
+        if memory_source_is_excluded(&transaction, &existing.memory.source_message_id)? {
+            return Err(VaultError::MemorySourceForgotten);
+        }
+
+        let updated_at = now_rfc3339();
+        let changed = transaction.execute(
+            "UPDATE memory_records
+             SET content = ?1, evidence_state = 'user_confirmed',
+                 revision = revision + 1, edited = 1, updated_at = ?2
+             WHERE id = ?3 AND deleted = 0 AND revision = ?4",
+            params![content, updated_at, memory_id, expected_revision],
+        )?;
+        if changed != 1 {
+            return Err(VaultError::MemoryRevisionConflict);
+        }
+        let updated = memory_with_deleted_from_id(&transaction, &memory_id)?;
+        transaction.commit()?;
+        Ok(updated.memory)
+    }
+
+    /// Forget every derived memory from the selected source turn. The rows are
+    /// content-free tombstones, and a durable source exclusion prevents a
+    /// completed-turn derivation retry from recreating the forgotten records.
+    pub fn delete_memory(&mut self, memory_id: &str, expected_revision: i64) -> Result<()> {
+        let memory_id = canonical_id(memory_id, "memory ID")?;
+        validate_revision(expected_revision)?;
+
+        let transaction = self.connection.transaction()?;
+        let existing = memory_with_deleted_from_id(&transaction, &memory_id)?;
+        if existing.deleted {
+            return Err(VaultError::MemoryDeleted);
+        }
+        if existing.memory.revision != expected_revision {
+            return Err(VaultError::MemoryRevisionConflict);
+        }
+
+        let source_message_id = existing.memory.source_message_id.clone();
+        let timestamp = now_rfc3339();
+        transaction.execute(
+            "UPDATE memory_records
+             SET deleted = 1, content = '', evidence_quote = '',
+                 revision = revision + 1, updated_at = ?1
+             WHERE source_message_id = ?2 AND deleted = 0",
+            params![timestamp, source_message_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO memory_exclusions (source_message_id, scope, created_at)
+             VALUES (?1, 'source_turn', ?2)
+             ON CONFLICT(source_message_id) DO NOTHING",
+            params![source_message_id, timestamp],
+        )?;
+        // A source turn that is being forgotten cannot be processed by a
+        // pending derivation. A running job is normally prevented by Engine's
+        // active-work guard, but failing it here also protects direct Vault
+        // callers and makes the transaction self-contained.
+        transaction.execute(
+            "UPDATE notes_jobs
+             SET status = 'failed', updated_at = ?1
+             WHERE assistant_message_id = ?2 AND status IN ('pending', 'running')",
+            params![timestamp, existing.memory.assistant_message_id],
+        )?;
+        // Notes generated from the forgotten source are derived copies of the
+        // same user disclosure. Forgetting this source turn therefore removes
+        // them from the visible notebook as content-free tombstones as well;
+        // an explicit UI confirmation is required before this command runs.
+        transaction.execute(
+            "UPDATE user_notes
+             SET deleted = 1, content = '', evidence_quote = '',
+                 revision = revision + 1, updated_at = ?1
+             WHERE source_message_id = ?2 AND deleted = 0",
+            params![timestamp, source_message_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Return the visible notebook entries. Internal memory records are kept
     /// in a separate table and intentionally have no public listing method.
     pub fn list_notes(&self) -> Result<Vec<UserNote>> {
@@ -445,6 +613,9 @@ impl Vault {
             return Err(VaultError::AssistantNotComplete);
         }
         let user = source_user_message(&transaction, &assistant)?;
+        if memory_source_is_excluded(&transaction, &user.id)? {
+            return Err(VaultError::MemorySourceForgotten);
+        }
 
         let status: String = transaction
             .query_row(
@@ -523,6 +694,9 @@ impl Vault {
             return Err(VaultError::AssistantNotComplete);
         }
         let user = source_user_message(&transaction, &assistant)?;
+        if memory_source_is_excluded(&transaction, &user.id)? {
+            return Err(VaultError::MemorySourceForgotten);
+        }
         let status: String = transaction
             .query_row(
                 "SELECT status FROM notes_jobs WHERE assistant_message_id = ?1",
@@ -546,8 +720,10 @@ impl Vault {
             transaction.execute(
                 "INSERT INTO memory_records
                  (id, session_id, source_message_id, assistant_message_id,
-                  kind, content, evidence_quote, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  kind, content, evidence_quote, evidence_state, revision,
+                  edited, deleted, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'user_reported',
+                         1, 0, 0, ?8, ?8)",
                 params![
                     Uuid::new_v4().to_string(),
                     user.session_id,
@@ -592,18 +768,28 @@ impl Vault {
 
     /// Build a bounded retrieval bundle from source-backed internal memory.
     /// Only records whose exact evidence is still a persisted user message are
-    /// considered, and the output is explicitly labeled as user-reported.
+    /// considered, and the output carries its evidence state so corrections
+    /// are distinguishable from fresh model extraction.
     pub fn memory_context(&self, limit_bytes: usize) -> Result<String> {
         if limit_bytes == 0 {
             return Ok(String::new());
         }
         let mut statement = self.connection.prepare(
             "SELECT memory_records.kind, memory_records.content,
-                    memory_records.evidence_quote
+                    memory_records.evidence_quote, memory_records.evidence_state
              FROM memory_records
              JOIN messages ON messages.id = memory_records.source_message_id
              WHERE messages.role = 'user'
-             ORDER BY memory_records.created_at ASC, memory_records.rowid ASC",
+               AND memory_records.deleted = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM memory_exclusions
+                   WHERE memory_exclusions.source_message_id = memory_records.source_message_id
+               )
+             ORDER BY CASE memory_records.evidence_state
+                          WHEN 'user_confirmed' THEN 0
+                          ELSE 1
+                      END,
+                      memory_records.updated_at DESC, memory_records.rowid DESC",
         )?;
         let mut rows = statement.query([])?;
         let mut context = String::new();
@@ -613,12 +799,10 @@ impl Vault {
                 MemoryKind::from_db_value(&kind_value).ok_or(rusqlite::Error::InvalidQuery)?;
             let content: String = row.get(1)?;
             let evidence_quote: String = row.get(2)?;
-            let line = format!(
-                "[user-reported] {}: {} (evidence: \"{}\")\n",
-                memory_kind_label(kind),
-                content,
-                evidence_quote
-            );
+            let evidence_state_value: String = row.get(3)?;
+            let evidence_state = MemoryEvidenceState::from_db_value(&evidence_state_value)
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+            let line = memory_context_line(kind, evidence_state, &content, &evidence_quote);
             if line.len() > limit_bytes.saturating_sub(context.len()) {
                 break;
             }
@@ -875,6 +1059,78 @@ struct StoredUserNote {
     deleted: bool,
 }
 
+struct StoredMemoryRecord {
+    memory: MemoryRecord,
+    deleted: bool,
+}
+
+fn memory_record_from_row(row: &Row<'_>) -> rusqlite::Result<MemoryRecord> {
+    let kind_value: String = row.get(4)?;
+    let kind = MemoryKind::from_db_value(&kind_value).ok_or(rusqlite::Error::InvalidQuery)?;
+    let evidence_state_value: String = row.get(7)?;
+    let evidence_state = MemoryEvidenceState::from_db_value(&evidence_state_value)
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    let edited: i64 = row.get(9)?;
+    if !matches!(edited, 0 | 1) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(MemoryRecord {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        source_message_id: row.get(2)?,
+        assistant_message_id: row.get(3)?,
+        kind,
+        content: row.get(5)?,
+        evidence_quote: row.get(6)?,
+        evidence_state,
+        revision: row.get(8)?,
+        edited: edited == 1,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+fn memory_with_deleted_from_id(
+    transaction: &Transaction<'_>,
+    memory_id: &str,
+) -> Result<StoredMemoryRecord> {
+    transaction
+        .query_row(
+            "SELECT id, session_id, source_message_id, assistant_message_id,
+                    kind, content, evidence_quote, evidence_state, revision,
+                    edited, created_at, updated_at, deleted
+             FROM memory_records WHERE id = ?1",
+            [memory_id],
+            |row| {
+                let memory = memory_record_from_row(row)?;
+                let deleted: i64 = row.get(12)?;
+                if !matches!(deleted, 0 | 1) {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                Ok(StoredMemoryRecord {
+                    memory,
+                    deleted: deleted == 1,
+                })
+            },
+        )
+        .optional()?
+        .ok_or(VaultError::MemoryNotFound)
+}
+
+fn memory_source_is_excluded(
+    transaction: &Transaction<'_>,
+    source_message_id: &str,
+) -> Result<bool> {
+    let excluded: Option<i64> = transaction
+        .query_row(
+            "SELECT 1 FROM memory_exclusions WHERE source_message_id = ?1",
+            [source_message_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(excluded.is_some())
+}
+
 fn user_note_from_row(row: &Row<'_>) -> rusqlite::Result<UserNote> {
     let kind_value: String = row.get(3)?;
     let kind = NoteKind::from_db_value(&kind_value).ok_or(rusqlite::Error::InvalidQuery)?;
@@ -948,6 +1204,34 @@ fn memory_kind_label(kind: MemoryKind) -> &'static str {
         MemoryKind::Goal => "goal",
         MemoryKind::Preference => "preference",
         MemoryKind::Concern => "concern",
+    }
+}
+
+fn memory_context_line(
+    kind: MemoryKind,
+    evidence_state: MemoryEvidenceState,
+    content: &str,
+    evidence_quote: &str,
+) -> String {
+    match evidence_state {
+        MemoryEvidenceState::UserReported => format!(
+            "[user-reported] {}: {} (evidence: \"{}\")\n",
+            memory_kind_label(kind),
+            content,
+            evidence_quote
+        ),
+        MemoryEvidenceState::UserConfirmed => format!(
+            "[user-corrected] {}: {} (original evidence: \"{}\")\n",
+            memory_kind_label(kind),
+            content,
+            evidence_quote
+        ),
+        MemoryEvidenceState::Inferred => format!(
+            "[inferred] {}: {} (evidence: \"{}\")\n",
+            memory_kind_label(kind),
+            content,
+            evidence_quote
+        ),
     }
 }
 
@@ -1117,23 +1401,52 @@ fn notes_schema_sql() -> String {
          );
          CREATE INDEX user_notes_visible_idx
              ON user_notes (deleted, updated_at);
-         CREATE TABLE memory_records (
+         {memory_schema}",
+        MAX_CONTENT = MAX_CANDIDATE_CONTENT_CHARS,
+        MAX_QUOTE = MAX_EVIDENCE_QUOTE_CHARS,
+        memory_schema = memory_schema_sql(),
+    )
+}
+
+fn memory_records_table_sql() -> String {
+    format!(
+        "CREATE TABLE memory_records (
              id TEXT PRIMARY KEY NOT NULL,
              session_id TEXT NOT NULL,
              source_message_id TEXT NOT NULL,
              assistant_message_id TEXT NOT NULL,
              kind TEXT NOT NULL CHECK (kind IN ('person', 'event', 'goal', 'preference', 'concern')),
-             content TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND {MAX_CONTENT}),
-             evidence_quote TEXT NOT NULL CHECK (length(evidence_quote) BETWEEN 1 AND {MAX_QUOTE}),
+             content TEXT NOT NULL CHECK (deleted = 1 OR length(content) BETWEEN 1 AND {MAX_CONTENT}),
+             evidence_quote TEXT NOT NULL CHECK (deleted = 1 OR length(evidence_quote) BETWEEN 1 AND {MAX_QUOTE}),
+             evidence_state TEXT NOT NULL CHECK (evidence_state IN ('user_reported', 'user_confirmed', 'inferred')),
+             revision INTEGER NOT NULL CHECK (revision >= 1),
+             edited INTEGER NOT NULL CHECK (edited IN (0, 1)),
+             deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
              created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL,
              FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
              FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE,
              FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
-         );
-         CREATE INDEX memory_records_context_idx
-             ON memory_records (created_at);",
+         );",
         MAX_CONTENT = MAX_CANDIDATE_CONTENT_CHARS,
         MAX_QUOTE = MAX_EVIDENCE_QUOTE_CHARS,
+    )
+}
+
+fn memory_schema_sql() -> String {
+    format!(
+        "{memory_records}
+         CREATE INDEX memory_records_context_idx
+             ON memory_records (deleted, updated_at);
+         CREATE TABLE memory_exclusions (
+             source_message_id TEXT PRIMARY KEY NOT NULL,
+             scope TEXT NOT NULL CHECK (scope = 'source_turn'),
+             created_at TEXT NOT NULL,
+             FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE
+         );
+         CREATE INDEX memory_exclusions_scope_idx
+             ON memory_exclusions (scope, created_at);",
+        memory_records = memory_records_table_sql(),
     )
 }
 
@@ -1156,6 +1469,37 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                  WHERE role = 'assistant' AND status = 'complete'",
                 [],
             )?;
+            transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            transaction.commit()?;
+            Ok(())
+        }
+        2 => {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(&format!(
+                "DROP INDEX IF EXISTS memory_records_context_idx;
+                     ALTER TABLE memory_records RENAME TO memory_records_v2;
+                     {memory_records}
+                     INSERT INTO memory_records
+                         (id, session_id, source_message_id, assistant_message_id,
+                          kind, content, evidence_quote, evidence_state, revision,
+                          edited, deleted, created_at, updated_at)
+                     SELECT id, session_id, source_message_id, assistant_message_id,
+                            kind, content, evidence_quote, 'user_reported', 1,
+                            0, 0, created_at, created_at
+                     FROM memory_records_v2;
+                     DROP TABLE memory_records_v2;
+                     CREATE INDEX memory_records_context_idx
+                         ON memory_records (deleted, updated_at);
+                     CREATE TABLE memory_exclusions (
+                         source_message_id TEXT PRIMARY KEY NOT NULL,
+                         scope TEXT NOT NULL CHECK (scope = 'source_turn'),
+                         created_at TEXT NOT NULL,
+                         FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE
+                     );
+                     CREATE INDEX memory_exclusions_scope_idx
+                         ON memory_exclusions (scope, created_at);",
+                memory_records = memory_records_table_sql(),
+            ))?;
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             transaction.commit()?;
             Ok(())
@@ -1185,12 +1529,13 @@ fn validate_schema(connection: &Connection) -> Result<()> {
         .query_row(
             "SELECT count(*) FROM sqlite_master
              WHERE type = 'table' AND name IN
-                 ('sessions', 'messages', 'notes_jobs', 'user_notes', 'memory_records')",
+                 ('sessions', 'messages', 'notes_jobs', 'user_notes', 'memory_records',
+                  'memory_exclusions')",
             [],
             |row| row.get(0),
         )
         .map_err(|_| VaultError::CorruptDatabase)?;
-    if table_count != 5 {
+    if table_count != 6 {
         return Err(VaultError::CorruptDatabase);
     }
     Ok(())
@@ -1433,7 +1778,7 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::notes::{MemoryCandidate, NoteCandidate};
+    use crate::notes::{MemoryCandidate, MemoryEvidenceState, NoteCandidate};
     use std::fs;
 
     fn temp_vault_dir() -> tempfile::TempDir {
@@ -1666,6 +2011,7 @@ mod tests {
             .connection
             .execute_batch(
                 "DROP TABLE memory_records;
+                 DROP TABLE memory_exclusions;
                  DROP TABLE user_notes;
                  DROP TABLE notes_jobs;
                  PRAGMA user_version = 1;",
@@ -1681,8 +2027,98 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert!(migrated.list_notes().expect("notes").is_empty());
+    }
+
+    #[test]
+    fn migrates_schema_two_memory_rows_with_safe_defaults() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let (user, assistant) = finish_synthetic_turn(
+            &mut vault,
+            &session.id,
+            "I want to reconnect with a synthetic friend.",
+        );
+        vault
+            .connection
+            .execute_batch(
+                "DROP TABLE memory_exclusions;
+                 DROP TABLE memory_records;
+                 CREATE TABLE memory_records (
+                     id TEXT PRIMARY KEY NOT NULL,
+                     session_id TEXT NOT NULL,
+                     source_message_id TEXT NOT NULL,
+                     assistant_message_id TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK (kind IN ('person', 'event', 'goal', 'preference', 'concern')),
+                     content TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND 600),
+                     evidence_quote TEXT NOT NULL CHECK (length(evidence_quote) BETWEEN 1 AND 600),
+                     created_at TEXT NOT NULL,
+                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                     FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+                     FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX memory_records_context_idx ON memory_records (created_at);
+                 PRAGMA user_version = 2;",
+            )
+            .expect("make schema two fixture");
+        let memory_id = Uuid::new_v4().to_string();
+        vault
+            .connection
+            .execute(
+                "INSERT INTO memory_records
+                 (id, session_id, source_message_id, assistant_message_id,
+                  kind, content, evidence_quote, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'goal', ?5, ?6, ?7)",
+                params![
+                    memory_id,
+                    session.id,
+                    user.id,
+                    assistant.id,
+                    "Reconnect with a synthetic friend",
+                    "reconnect with a synthetic friend",
+                    now_rfc3339(),
+                ],
+            )
+            .expect("legacy memory row");
+        drop(vault);
+
+        let mut migrated = Vault::open(directory.path(), "synthetic passphrase").expect("migrate");
+        let memory = migrated
+            .list_memories()
+            .expect("migrated memories")
+            .pop()
+            .expect("migrated memory");
+        assert_eq!(memory.id, memory_id);
+        assert_eq!(memory.revision, 1);
+        assert!(!memory.edited);
+        assert_eq!(memory.evidence_state, MemoryEvidenceState::UserReported);
+        assert_eq!(memory.updated_at, memory.created_at);
+        migrated
+            .delete_memory(&memory.id, memory.revision)
+            .expect("forget migrated memory");
+        assert!(migrated
+            .list_memories()
+            .expect("forgotten memories")
+            .is_empty());
+        let tombstone: (i64, String, String) = migrated
+            .connection
+            .query_row(
+                "SELECT deleted, content, evidence_quote
+                 FROM memory_records WHERE id = ?1",
+                [&memory.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("migrated tombstone");
+        assert_eq!(tombstone.0, 1);
+        assert!(tombstone.1.is_empty());
+        assert!(tombstone.2.is_empty());
+        let version: i64 = migrated
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -1699,6 +2135,7 @@ mod tests {
             .connection
             .execute_batch(
                 "DROP TABLE memory_records;
+                 DROP TABLE memory_exclusions;
                  DROP TABLE user_notes;
                  DROP TABLE notes_jobs;
                  PRAGMA user_version = 1;",
@@ -1922,6 +2359,167 @@ mod tests {
     }
 
     #[test]
+    fn memory_records_preserve_provenance_corrections_and_restart() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let (user, assistant) = finish_synthetic_turn(
+            &mut vault,
+            &session.id,
+            "I miss my friends and want to reconnect.",
+        );
+        vault.begin_notes(&assistant.id).expect("claim");
+        vault
+            .apply_notes(&assistant.id, &synthetic_patch())
+            .expect("apply");
+
+        let memory = vault
+            .list_memories()
+            .expect("list memories")
+            .pop()
+            .expect("memory");
+        assert_eq!(memory.session_id, session.id);
+        assert_eq!(memory.source_message_id, user.id);
+        assert_eq!(memory.assistant_message_id, assistant.id);
+        assert_eq!(memory.evidence_quote, "miss my friends");
+        assert_eq!(memory.evidence_state, MemoryEvidenceState::UserReported);
+        assert_eq!(memory.revision, 1);
+        assert!(!memory.edited);
+
+        let corrected = vault
+            .edit_memory(&memory.id, "Reconnect with my sibling", memory.revision)
+            .expect("correct memory");
+        assert_eq!(corrected.content, "Reconnect with my sibling");
+        assert_eq!(corrected.evidence_quote, memory.evidence_quote);
+        assert_eq!(corrected.source_message_id, memory.source_message_id);
+        assert_eq!(corrected.revision, 2);
+        assert!(corrected.edited);
+        assert_eq!(corrected.evidence_state, MemoryEvidenceState::UserConfirmed);
+        assert!(matches!(
+            vault.edit_memory(&memory.id, "stale correction", memory.revision),
+            Err(VaultError::MemoryRevisionConflict)
+        ));
+
+        let context = vault.memory_context(1_000).expect("corrected context");
+        assert!(context.contains("[user-corrected] goal: Reconnect with my sibling"));
+        assert!(context.contains("original evidence: \"miss my friends\""));
+
+        drop(vault);
+        let reopened = Vault::open(directory.path(), "synthetic passphrase").expect("reopen");
+        let persisted = reopened
+            .list_memories()
+            .expect("persisted memories")
+            .pop()
+            .expect("persisted memory");
+        assert_eq!(persisted.content, corrected.content);
+        assert_eq!(persisted.revision, 2);
+        assert!(persisted.edited);
+        assert_eq!(persisted.evidence_state, MemoryEvidenceState::UserConfirmed);
+    }
+
+    #[test]
+    fn forgetting_memory_excludes_source_turn_and_blocks_derivation_retry() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let (user, assistant) = finish_synthetic_turn(
+            &mut vault,
+            &session.id,
+            "I miss my friends and want to reconnect.",
+        );
+        vault.begin_notes(&assistant.id).expect("claim");
+        vault
+            .apply_notes(&assistant.id, &synthetic_patch())
+            .expect("apply");
+        let memory = vault
+            .list_memories()
+            .expect("list memories")
+            .pop()
+            .expect("memory");
+        assert_eq!(vault.list_notes().expect("notes").len(), 1);
+        assert!(vault
+            .memory_context(1_000)
+            .expect("context before forget")
+            .contains("Reconnect with friends"));
+
+        // Simulate a retry that has already loaded the source. The native
+        // engine normally serializes this with the forget command, but the
+        // vault transaction must also reject the stale result if the two
+        // operations race at a lower boundary.
+        vault
+            .connection
+            .execute(
+                "UPDATE notes_jobs SET status = 'failed' WHERE assistant_message_id = ?1",
+                [&assistant.id],
+            )
+            .expect("make retryable job");
+        vault.begin_notes(&assistant.id).expect("start stale retry");
+        vault
+            .delete_memory(&memory.id, memory.revision)
+            .expect("forget memory");
+        assert!(matches!(
+            vault.apply_notes(&assistant.id, &synthetic_patch()),
+            Err(VaultError::MemorySourceForgotten)
+        ));
+        assert!(vault.list_memories().expect("visible memories").is_empty());
+        assert!(vault.list_notes().expect("visible notes").is_empty());
+        assert!(vault
+            .memory_context(1_000)
+            .expect("context after forget")
+            .is_empty());
+        let visible_context = vault
+            .list_context_messages(&session.id)
+            .expect("model context messages");
+        assert!(visible_context.is_empty());
+        assert_eq!(
+            vault.list_messages(&session.id).expect("transcript").len(),
+            2
+        );
+        assert!(matches!(
+            vault.begin_notes(&assistant.id),
+            Err(VaultError::MemorySourceForgotten)
+        ));
+
+        let (deleted, content, evidence, revision): (i64, String, String, i64) = vault
+            .connection
+            .query_row(
+                "SELECT deleted, content, evidence_quote, revision
+                 FROM memory_records WHERE id = ?1",
+                [&memory.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("memory tombstone");
+        assert_eq!(deleted, 1);
+        assert!(content.is_empty());
+        assert!(evidence.is_empty());
+        assert_eq!(revision, 2);
+        let exclusion_count: i64 = vault
+            .connection
+            .query_row(
+                "SELECT count(*) FROM memory_exclusions WHERE source_message_id = ?1",
+                [&user.id],
+                |row| row.get(0),
+            )
+            .expect("source exclusion");
+        assert_eq!(exclusion_count, 1);
+
+        drop(vault);
+        let mut reopened = Vault::open(directory.path(), "synthetic passphrase").expect("reopen");
+        assert!(reopened
+            .list_memories()
+            .expect("reopened memories")
+            .is_empty());
+        assert!(reopened
+            .memory_context(1_000)
+            .expect("reopened context")
+            .is_empty());
+        assert!(matches!(
+            reopened.begin_notes(&assistant.id),
+            Err(VaultError::MemorySourceForgotten)
+        ));
+    }
+
+    #[test]
     fn restart_fails_pending_notes_without_deleting_old_records() {
         let directory = temp_vault_dir();
         let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
@@ -1966,7 +2564,13 @@ mod tests {
             .expect("apply");
         vault.delete_session(&session.id).expect("delete session");
         assert!(vault.list_sessions().expect("sessions").is_empty());
-        for table in ["messages", "notes_jobs", "user_notes", "memory_records"] {
+        for table in [
+            "messages",
+            "notes_jobs",
+            "user_notes",
+            "memory_records",
+            "memory_exclusions",
+        ] {
             let count: i64 = vault
                 .connection
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
