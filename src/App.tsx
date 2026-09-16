@@ -412,9 +412,9 @@ export default function App() {
     if (!isDesktop || sample || screen !== "conversation") return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let passes = 0;
+    let consecutiveFailures = 0;
     const schedule = (delay: number) => {
-      if (!cancelled && passes < 4)
+      if (!cancelled && consecutiveFailures < 4)
         timer = setTimeout(() => void inspect(), delay);
     };
     const inspect = async () => {
@@ -428,8 +428,8 @@ export default function App() {
         if (cancelled) return;
         const retryable = jobs.filter(
           (job) =>
-            job.status === "pending" ||
-            (job.status === "failed" && job.attemptCount < 3),
+            (job.status === "pending" || job.status === "failed") &&
+            job.attemptCount < 3,
         );
         if (!retryable.length) return;
         const dueAt = Math.min(
@@ -442,7 +442,6 @@ export default function App() {
           schedule(delay);
           return;
         }
-        passes += 1;
         await desktop.resumeNoteJobs((event) => {
           if (cancelled || event.type !== "notes") return;
           const status = formatDerivationStatus(
@@ -463,10 +462,11 @@ export default function App() {
             setMemories(loadedMemories);
           }
         }
-        schedule(Math.min(30_000, 2_000 * 2 ** (passes - 1)));
+        consecutiveFailures = 0;
+        schedule(2_000);
       } catch {
-        passes += 1;
-        schedule(Math.min(30_000, 2_000 * 2 ** (passes - 1)));
+        consecutiveFailures += 1;
+        schedule(Math.min(30_000, 2_000 * 2 ** (consecutiveFailures - 1)));
       }
     };
     void inspect();
