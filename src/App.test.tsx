@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import {
   desktop,
+  type DuePlan,
   type MemoryRecord,
   type Session,
   type TurnEvent,
@@ -99,22 +100,20 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 async function openConnectedApp() {
-  render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-  fireEvent.click(screen.getByRole("button", { name: "Model connection" }));
-  fireEvent.click(
-    screen.getByRole("button", { name: "Find available models" }),
-  );
-  await screen.findByDisplayValue("synthetic-model");
-  fireEvent.click(
-    screen.getByRole("button", { name: /Save and check connection/ }),
-  );
-  await screen.findByText("Connection saved. Ready for a conversation.");
-  fireEvent.click(screen.getByRole("button", { name: "Done" }));
-  const conversation = screen.queryByRole("button", {
-    name: /Monday conversation.*September/,
+  vi.mocked(desktop.getProviderSettings).mockResolvedValue({
+    provider: "ollama",
+    baseUrl: "http://127.0.0.1:11434",
+    model: "synthetic-model",
+    remoteDataConsent: false,
+    credentialPresent: false,
+    revision: 2,
   });
-  if (conversation) fireEvent.click(conversation);
+  render(<App />);
+  const conversations = await screen.findAllByRole("button", {
+    name: /Monday conversation/,
+  });
+  fireEvent.click(conversations[0]!);
+  await screen.findByRole("textbox", { name: "Your message" });
 }
 function submit(content: string) {
   fireEvent.change(screen.getByRole("textbox", { name: "Your message" }), {
@@ -249,7 +248,7 @@ describe("native conversation lifecycle", () => {
       screen.queryByText(/Visible before locking|Late private text/),
     ).not.toBeInTheDocument();
     vi.mocked(desktop.getProviderSettings).mockResolvedValue({
-      provider: "ollama",
+      provider: "ollama" as const,
       baseUrl: "http://127.0.0.1:11434",
       model: "synthetic-model",
       remoteDataConsent: false,
@@ -357,6 +356,107 @@ describe("native conversation lifecycle", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Connection unavailable.",
     );
+  });
+
+  it("does not let an older completed turn clear a newer active reply", async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    let firstEvent: ((event: TurnEvent) => void) | undefined;
+    let secondEvent: ((event: TurnEvent) => void) | undefined;
+    vi.mocked(desktop.sendMessage)
+      .mockImplementationOnce(({ onEvent }) => {
+        firstEvent = onEvent;
+        return first.promise;
+      })
+      .mockImplementationOnce(({ onEvent }) => {
+        secondEvent = onEvent;
+        return second.promise;
+      });
+    await openConnectedApp();
+    submit("First synthetic turn.");
+    act(() =>
+      firstEvent?.({
+        type: "finished",
+        messageId: "first-reply",
+        status: "complete",
+      }),
+    );
+    submit("Second synthetic turn.");
+    act(() =>
+      secondEvent?.({
+        type: "message",
+        message: {
+          id: "second-reply",
+          sessionId: session.id,
+          role: "assistant",
+          content: "The newer reply is still running.",
+          status: "streaming",
+          createdAt: session.createdAt,
+        },
+      }),
+    );
+    await act(async () => {
+      first.resolve();
+      await first.promise;
+    });
+    expect(
+      screen.getByRole("button", { name: "Stop reply" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("The newer reply is still running."),
+    ).toBeInTheDocument();
+    await act(async () => {
+      second.resolve();
+      await second.promise;
+    });
+  });
+
+  it("opens a generic reminder from the native due-plan array", async () => {
+    let notify: ((plans: DuePlan[]) => void) | undefined;
+    vi.mocked(desktop.onPlannedSessionDue).mockImplementation(
+      async (listener) => {
+        notify = listener;
+        return () => {};
+      },
+    );
+    render(<App />);
+    await screen.findByRole("heading", { name: "Good morning." });
+    act(() =>
+      notify?.([
+        {
+          id: "synthetic-plan",
+          notifications: true,
+          scheduledAt: "2026-09-16T12:00:00Z",
+        },
+      ]),
+    );
+    expect(
+      screen.getByRole("heading", { name: "A planned session is ready" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Your planned session is ready."),
+    ).toBeInTheDocument();
+  });
+
+  it("wakes a future failed note job that remains retryable", async () => {
+    const job = {
+      messageId: "synthetic-reply",
+      status: "failed" as const,
+      attemptCount: 1,
+      nextAttemptAt: new Date(Date.now() + 30).toISOString(),
+      memoryEnabled: true,
+      notesEnabled: true,
+      provider: "ollama" as const,
+      model: "synthetic-model",
+      createdAt: "2026-09-16T10:00:00Z",
+      updatedAt: "2026-09-16T10:00:00Z",
+    };
+    vi.mocked(desktop.listNoteJobs)
+      .mockResolvedValueOnce([job])
+      .mockResolvedValueOnce([job])
+      .mockResolvedValue([]);
+    render(<App />);
+    await waitFor(() => expect(desktop.resumeNoteJobs).toHaveBeenCalledOnce());
   });
 });
 
@@ -971,6 +1071,7 @@ describe("ChatGPT demo consent", () => {
     ]);
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Model connection" }));
     fireEvent.click(screen.getByRole("button", { name: /Online provider/ }));
   }
   it("requires explicit consent for messages and note updates", async () => {
