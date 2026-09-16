@@ -73,7 +73,9 @@ The paired note writer receives visible source messages and bounded reconciliati
 
 Use OS application-data locations outside the source checkout. Exclude vault content from app-created diagnostic bundles. Disable plaintext SQL trace logs, configure temporary SQL storage to memory, and test main database, journal, WAL, temporary files, and recovery paths with known synthetic marker strings. Include full-text tables and optional vector data in those tests.
 
-Create backups through a consistent database snapshot operation into a separately encrypted destination. Do not copy a live database file and assume it contains the WAL state. A portable `.openmind` backup includes an authenticated manifest, schema version, encrypted database snapshot, and a key envelope protected by a backup passphrase or recovery secret. Never include only a machine-bound key and call the backup portable.
+The prototype creates backups through a checkpoint plus `VACUUM INTO` while the engine excludes concurrent writes. Its portable `.openmind-backup` archive authenticates and encrypts the manifest, SQLCipher snapshot, and a database-key envelope rewrapped by the backup passphrase. Restore decrypts into a generated staging directory beside the vault, opens and integrity-checks it, preserves any existing vault under a generated rollback name, then replaces it. Failed final verification restores the previous directory. The backup passphrase becomes the restored vault passphrase.
+
+Passphrase change rewraps the database key and uses a previous-envelope fallback if replacement is interrupted. It cannot recover a forgotten passphrase. The implemented recovery mechanism is a separately stored encrypted backup whose passphrase is still known. Native keychain unlock remains an optional convenience proposal rather than a recovery mechanism.
 
 Restore into a new vault location, authenticate before migration, and leave the original untouched until restore checks pass. Backup creation must succeed without writing an intermediate plaintext database. Verify restoration on a second OS before promising portability.
 

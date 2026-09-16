@@ -16,6 +16,9 @@ pub struct Session {
     pub memory_enabled: bool,
     /// Whether this conversation may derive and update user notebook notes.
     pub notes_enabled: bool,
+    /// Transient conversations live only in process memory and disappear on lock or quit.
+    #[serde(default)]
+    pub private: bool,
 }
 
 impl fmt::Debug for Session {
@@ -28,6 +31,7 @@ impl fmt::Debug for Session {
             .field("revision", &self.revision)
             .field("memory_enabled", &self.memory_enabled)
             .field("notes_enabled", &self.notes_enabled)
+            .field("private", &self.private)
             .finish_non_exhaustive()
     }
 }

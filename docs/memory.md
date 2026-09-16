@@ -1,8 +1,8 @@
 # Memory model
 
-Status: full-product proposal. The [engineering preview](prototype.md#remembered-context-controls) implements source-backed records, corrections, and source-message-scoped forgetting; relationships, semantic retrieval, and topic-wide forgetting remain proposed. The graph provides continuity across conversations. It is not a psychological diagnosis, a simulation of a human mind, or a store of model chain-of-thought.
+Status: full-product proposal. The [desktop implementation](prototype.md#remembered-context-controls) includes source-backed records, corrections, source-message-scoped forgetting, encrypted FTS5, and optional local vector retrieval. Explicit relationships and topic-wide forgetting remain proposed. Memory provides continuity across conversations. It is not a psychological diagnosis or a store of model chain-of-thought.
 
-The September 16 [research and implementation proposal](memory-research.md) refines this design with seven overlapping views, query-aware keyword/vector retrieval, source eligibility, and a staged delivery plan. These remain recommendations. Existing code still uses five memory kinds and correction/recency ordering; the UI refinement does not implement semantic search.
+The September 16 [research proposal](memory-research.md) separates seven overlapping retrieval views from the five existing record kinds. Keyword lookup is available without an embedding model. Optional local embeddings use the same encrypted vault and activate after an explicit model-consistent rebuild. See [the implementation boundaries](daily-use-foundation.md) for permissions, indexing, and remaining evaluation work.
 
 ## What the graph represents
 

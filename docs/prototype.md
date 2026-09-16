@@ -1,4 +1,4 @@
-# Desktop engineering preview
+# Desktop implementation status
 
 The first implementation is a single-user desktop foundation. It is not an evaluated clinical product. Use synthetic conversations while developing it.
 
@@ -14,10 +14,18 @@ The first implementation is a single-user desktop foundation. It is not an evalu
 - Bounded retrieval of internal memory for later replies, clearly marked as untrusted historical context. User corrections take priority over generated records; current input takes priority in the context budget.
 - A separate Remembered context workspace with grouped statements, search, visible source evidence, conversation links, revision-checked corrections, and explicit forgetting controls. The browser demo provides fictional records with temporary edits.
 - Conversation controls with editable titles and independent remembered-context and notebook-saving switches, stored in the encrypted vault with revision checks. Off states remain visible in the conversation.
-- Durable notes jobs and explicit retry without resending the reply. Cancelled, interrupted, or malformed derivations leave existing notes intact. Reopening a vault marks unfinished jobs as failed. Completed replies can retry notes; interrupted replies do not generate notes.
-- Migration from conversation-only and paired-notes vaults to schema version 4, including memory revisions, source exclusions, conversation preferences, and per-job output permissions. Unknown future schemas are refused.
+- Durable notes jobs and explicit retry without resending the reply. Cancelled, interrupted, or malformed derivations leave existing notes intact. Reopening a vault requeues unfinished jobs with bounded retries. Foreground replies preempt background notes work. Completed replies can retry notes; interrupted replies do not generate notes.
+- Migration from conversation-only and paired-notes vaults through schema version 7, including memory revisions, source exclusions, conversation preferences, per-job output permissions, and lifecycle settings. Unknown future schemas are refused.
+- Portable `.openmind-backup` export and restore use a checkpointed SQLCipher snapshot, an authenticated encrypted archive, and a backup-specific passphrase. Restore verifies the staged vault before replacing an existing vault and keeps the previous vault available for rollback until final open succeeds. The backup passphrase becomes the restored vault passphrase.
+- Passphrase changes rewrap the random database key through a recoverable file replacement; they do not rewrite transcript data. There is no developer-held recovery. A separately stored encrypted backup is the implemented recovery path if its passphrase is known.
+- Private conversations stay in process memory, never retrieve saved memory, and never create transcript, note, memory, or job rows. Locking or quitting discards them. Configurable idle locking is enforced by a native monitor and clears private state; a renderer event announces an automatic lock. The desktop event loop also locks an open vault when Tauri reports that the app resumed after suspension.
+- Configurable age-based retention pruning and full-vault reset require explicit destructive confirmation. Both affect the active vault only; existing backup files and provider copies remain separate deletion boundaries.
 - A separate seeded demo vault opened with one click. It cannot unlock or replace the personal vault.
 - At most 20 recent messages and 6,000 UTF-8 bytes of conversation context. Each request asks for an 8,192-token context and at most 1,024 output tokens. Extended thinking is disabled in the request. These are conservative prototype limits, not validated budgets for every model or tokenizer.
+
+## September 16 daily-use increment
+
+[Implementation boundaries and remaining work](daily-use-foundation.md) cover encrypted provider/reading settings, the compatible API adapter, preemptible notes jobs, FTS5 and optional local embeddings, backup/restore, private sessions, retention, planned sessions, onboarding, and color themes. The browser view is for interface testing; native commands require the desktop app.
 
 ## Remembered context controls
 
@@ -25,7 +33,7 @@ Corrections update the selected record with a revision check, retain its origina
 
 Forgetting is scoped to the selected source message. Confirmation shows the affected memories and notebook entries, including any edited notes. The transaction clears those derived records and keeps a content-free source exclusion so a retry cannot recreate them. The original user message and its associated assistant reply remain readable in history but are excluded from later model context. Existing backups and provider copies are unchanged. This is not topic-wide forgetting: separately sourced disclosures and later messages can still contain the same information. Delete the conversation to remove its history and derived records from the active vault.
 
-The browser view offers a clearly labeled synthetic sample. Native vault and inference operations require the desktop shell. Connection and reading preferences currently last only for the open app instance. Only the appearance preference is saved in webview local storage.
+The browser view offers a clearly labeled synthetic sample. Native vault and inference operations require the desktop shell. Provider configuration, credentials, consent, and reading preferences are persisted in the encrypted vault. Appearance and accent choices are saved in webview local storage.
 
 ## Conversation controls
 
@@ -39,13 +47,13 @@ An experimental ChatGPT subscription adapter using Codex App Server is checked i
 
 ## Not implemented
 
-Entity reconciliation and explicit relationships between memory nodes, semantic retrieval, topic-wide forgetting, summaries, transcript editing, remote APIs, speech input/output, reminders, keychain convenience unlock, OS lock/suspend handling, automatic idle lock, encrypted backup/export, and signed updates are future work.
+Entity reconciliation and explicit relationships between memory nodes, topic-wide forgetting, summaries, transcript editing, speech input/output, keychain convenience unlock, direct OS session-lock notifications, and signed updates are future work. Suspend/resume delivery and OS session-lock behavior still require native verification on both supported platforms.
 
-The current extraction reads only the user message for its turn. It does not derive commitments from the assistant response, merge older entities, or process interrupted replies. One model request runs at a time, so a new reply waits until the notes request finishes or is stopped. This is the first implementation of the two-call design, not the complete job scheduling and graph specification. Deleting a notebook entry does not remove its source or internal memory; delete the conversation to remove all of those records from the active vault. Existing backups are outside that deletion.
+The current extraction reads only the user message for its turn. It does not derive commitments from the assistant response, merge older entities, or process interrupted replies. A new reply cancels and defers active notes work; a bounded background queue resumes eligible jobs. This is the first implementation of the two-call design, not the complete job scheduling and graph specification. Deleting a notebook entry does not remove its source or internal memory; delete the conversation to remove all of those records from the active vault. Existing backups are outside that deletion.
 
 The current prompt is basic experimental guidance. There is no clinical input classifier, sentence-level output review, crisis detection evaluation, or clinical efficacy evaluation. Stream batching is for rendering and database efficiency; it is not safety review. UI state is cleared on lock, but JavaScript strings and model-runtime memory cannot be reliably erased. Locking closes Openmind's database connection and cancels its generation request; it does not unload a third-party runtime's model or erase its logs. Cancellation is cooperative, so the in-flight task may retain plaintext briefly after the lock command returns.
 
-No passphrase reset or recovery exists. Losing the passphrase loses access. A crash during initial creation can leave an incomplete vault, which the app refuses to overwrite. Only remove such files after establishing that they contain no data you need. The storage format is experimental and has not received an independent security audit.
+There is no passphrase reset or developer-held recovery. A portable backup can restore access only with its backup passphrase; losing every current vault and backup passphrase loses access. Migration creates an encrypted pre-migration database copy and retries from it after an interrupted or failed migration. A crash during initial creation can still leave an incomplete vault, which the app refuses to overwrite. Only remove such files after establishing that they contain no data you need. The storage and backup formats are experimental and have not received an independent security audit.
 
 No app account, content telemetry, conversation server, or automatic model download is included. Install and configure Ollama separately. Set `OLLAMA_NO_CLOUD=1` when starting its server for local use; a loopback address alone cannot prove local execution. Do not use the small live-test model as a clinical model recommendation.
 
@@ -71,7 +79,7 @@ This loads the installed Visual Studio C++ environment and selects a native Wind
 
 ## Test access
 
-Choose **Open demo** on the welcome or lock screen. No personal account or vault setup is needed.
+Choose **Explore with example conversations** on the welcome or lock screen. No personal account or vault setup is needed.
 
 | Field | Value |
 | --- | --- |
@@ -142,10 +150,14 @@ The monotone UI refinement passes the production frontend build, 23 UI tests, 57
 
 Production assets were loaded through Playwright request interception, with no development server started. Browser checks covered the welcome screen, conversation, notes, remembered context, settings, correction, source-scoped forgetting and linked-note removal, search with no results, light/dark themes, reduced motion, 320px/390px layouts, and 200% CSS zoom. No page errors or horizontal overflow were observed. This is browser verification, not native screen-reader, OS zoom, live inference, or installer verification. Required macOS and Windows PR checks remain the merge gate.
 
-The [memory research proposal](memory-research.md) documents future retrieval and organization work. This UI change does not add embeddings, full-text search, new memory categories, or clinical validation.
+The [memory research proposal](memory-research.md) informed the subsequent [daily-use increment](daily-use-foundation.md), which adds encrypted full-text search, optional local embeddings, provider setup, vault controls, and planned sessions. Clinical validation remains outstanding.
 
 ## Conversation controls verification
 
 The conversation-controls increment passes 23 UI tests and 57 core regression tests, the production frontend build, native macOS compilation, formatting, and all-target Clippy with warnings denied. Three opt-in live-provider tests were not run. Tests cover independent output branches, skipping both-disabled jobs, messages submitted while saving was disabled, revocation across restart/re-enable/retry, active-work restrictions, revision conflicts, title limits, and schema-v3 migration preserving forgotten-source exclusions. Earlier schema migrations remain covered.
 
 Production-build browser checks with fictional data cover title changes, independent switches, visible off states, retained memory records, light/dark dialogs, reduced motion, and narrow layouts without page errors or horizontal overflow. Native screen-reader and Windows manual testing remain outstanding; both platform CI jobs run on the new pull request. The preceding remembered-context PR passed macOS and Windows CI before merging.
+
+## Daily-use integration verification
+
+The September 16 daily-use increment passes 103 Rust regression tests, 26 UI tests, and the production frontend build on Windows. Two opt-in local Ollama tests also passed using the installed `qwen3.5:4b` with synthetic text. No model download or remote inference was performed. See [implementation boundaries and remaining release work](daily-use-foundation.md).

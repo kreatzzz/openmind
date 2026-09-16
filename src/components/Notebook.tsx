@@ -20,7 +20,6 @@ const getErrorMessage = (reason: unknown) =>
 
 export function Notebook({
   notes,
-  sample,
   disabled,
   onEdit,
   onDelete,
@@ -70,12 +69,6 @@ export function Notebook({
             {notes.length} {notes.length === 1 ? "note" : "notes"}
           </span>
         </header>
-        {sample && (
-          <p className="notebook-disclosure">
-            Browser demo · fictional notes only. Changes reset when you close
-            the demo.
-          </p>
-        )}
         {error && (
           <p role="alert" className="inline-error">
             {error}

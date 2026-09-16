@@ -4,7 +4,7 @@ A desktop app in development for private, ongoing conversations about life, with
 
 **Status: desktop engineering preview. Not evaluated clinical care.**
 
-The current implementation includes a Geist-inspired desktop UI, a separate one-click demo, an encrypted conversation vault, Ollama streaming, source-linked editable notes, and a Remembered context workspace with correction and forgetting controls. Each conversation can be renamed and has independent switches for remembered context and notebook saving. A structured follow-up call saves user notes and internal memory together. Relationship mapping and the full clinical workflow remain in development. See [prototype capabilities, limitations, and setup](docs/prototype.md).
+The desktop app includes an encrypted conversation vault, local Ollama streaming, an optional OpenAI-compatible provider, source-linked notes, and editable remembered context. Query-aware memory uses encrypted keyword search and optional local embeddings. Private conversations, encrypted backups, passphrase changes, idle locking, retention controls, and planned sessions are included. The interface has guided setup, reading controls, and five accent themes with pure-black dark mode. See [capabilities, limitations, and setup](docs/prototype.md).
 
 Openmind is intended to connect life events, people, recurring concerns, and goals in an encrypted memory graph. Users can start a conversation whenever they want or set a reminder for a planned session. Local inference is the default; connecting a remote API is an explicit choice.
 
@@ -12,9 +12,16 @@ The intended product is a clinical therapy app. Target conditions, clinical deli
 
 Each submitted message should lead to a streamed text reply, an update to encrypted internal memory, and an update to separate user-facing notes. The proposed launch input is typing plus local speech-to-text, pending clarification. Text-to-speech output, with a provider such as ElevenLabs, comes later.
 
-## Try the demo
+## Run the app
 
-Run `bun run tauri dev` and choose **Open demo**. The public test login is `demo`, with password `openmind-demo-2026`; the button enters them automatically. The demo uses a separate vault containing fictional conversations. No personal account setup is required. See [Linux launch troubleshooting](docs/prototype.md#linux-startup-troubleshooting) if the desktop window fails to open.
+```sh
+bun install --frozen-lockfile
+bun run tauri dev
+```
+
+On Windows, first run `. ./scripts/windows-env.ps1` in the same PowerShell terminal. Create a workspace, protect it with a passphrase, then connect an installed Ollama model in Settings. The optional example workspace contains fictional conversations and stays separate from the personal vault.
+
+`bun run dev` opens the browser interface at `http://127.0.0.1:1420`. The browser can exercise layout, themes, notes, and context controls with example data; encrypted storage and model connections require the desktop app. See [Linux launch troubleshooting](docs/prototype.md#linux-startup-troubleshooting) if the desktop window fails to open.
 
 ## Start here
 
@@ -32,7 +39,7 @@ Run `bun run tauri dev` and choose **Open demo**. The public test login is `demo
 
 ## Foundation
 
-Tauri 2, Rust, React, TypeScript, Vite, Tailwind CSS, and Bun. SQLite with SQLCipher stores conversations and graph data. Ollama is the first local runtime integration, with a separate OpenAI-compatible adapter planned for other local servers and remote endpoints.
+Tauri 2, Rust, React, TypeScript, Vite, Tailwind CSS, and Bun. SQLite with SQLCipher stores conversations and graph data. Ollama is the first local runtime integration, with a separate OpenAI-compatible adapter for other local servers and explicitly authorized remote endpoints.
 
 Encryption protects stored data. Internal memory can be hidden from the normal interface, but cannot be guaranteed secret from the owner of a computer that decrypts and runs it. See the [privacy design](docs/privacy.md).
 

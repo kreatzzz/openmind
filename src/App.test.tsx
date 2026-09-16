@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import {
   desktop,
+  type DuePlan,
   type MemoryRecord,
   type Session,
   type TurnEvent,
@@ -18,6 +19,21 @@ import {
 vi.mock("./lib/desktop", () => ({
   isDesktop: true,
   desktop: {
+    onVaultLocked: vi.fn(),
+    onPlannedSessionDue: vi.fn(),
+    recordActivity: vi.fn(),
+    getProviderSettings: vi.fn(),
+    updateProviderSettings: vi.fn(),
+    checkProviderHealth: vi.fn(),
+    getReadingSettings: vi.fn(),
+    updateReadingSettings: vi.fn(),
+    listNoteJobs: vi.fn(),
+    resumeNoteJobs: vi.fn(),
+    createPrivateSession: vi.fn(),
+    listPlans: vi.fn(),
+    createPlan: vi.fn(),
+    removePlan: vi.fn(),
+    enablePlan: vi.fn(),
     getVaultStatus: vi.fn(),
     openDemo: vi.fn(),
     listNotes: vi.fn(),
@@ -84,11 +100,20 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 async function openConnectedApp() {
+  vi.mocked(desktop.getProviderSettings).mockResolvedValue({
+    provider: "ollama",
+    baseUrl: "http://127.0.0.1:11434",
+    model: "synthetic-model",
+    remoteDataConsent: false,
+    credentialPresent: false,
+    revision: 2,
+  });
   render(<App />);
-  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-  fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
-  await screen.findByText("Ollama is ready");
-  fireEvent.click(screen.getByRole("button", { name: "Done" }));
+  const conversations = await screen.findAllByRole("button", {
+    name: /Monday conversation/,
+  });
+  fireEvent.click(conversations[0]!);
+  await screen.findByRole("textbox", { name: "Your message" });
 }
 function submit(content: string) {
   fireEvent.change(screen.getByRole("textbox", { name: "Your message" }), {
@@ -110,6 +135,46 @@ beforeEach(() => {
     unlocked: true,
     isDemo: false,
   });
+  vi.mocked(desktop.onVaultLocked).mockResolvedValue(() => {});
+  vi.mocked(desktop.onPlannedSessionDue).mockResolvedValue(() => {});
+  vi.mocked(desktop.recordActivity).mockResolvedValue();
+  vi.mocked(desktop.getProviderSettings).mockResolvedValue({
+    provider: "ollama",
+    baseUrl: "http://127.0.0.1:11434",
+    model: "",
+    remoteDataConsent: false,
+    credentialPresent: false,
+    revision: 1,
+  });
+  vi.mocked(desktop.updateProviderSettings).mockImplementation(
+    async (value) => ({
+      ...value,
+      revision: value.revision + 1,
+    }),
+  );
+  vi.mocked(desktop.checkProviderHealth).mockResolvedValue({
+    provider: "ollama",
+    status: "ready",
+    destination: "local",
+    model: "synthetic-model",
+    capabilities: { streaming: true, structuredNotes: true },
+  });
+  vi.mocked(desktop.getReadingSettings).mockResolvedValue({
+    textScalePercent: 100,
+    lineWidth: "comfortable",
+    reduceMotion: false,
+    enterToSend: true,
+    revision: 1,
+  });
+  vi.mocked(desktop.updateReadingSettings).mockImplementation(
+    async (value) => ({
+      ...value,
+      revision: value.revision + 1,
+    }),
+  );
+  vi.mocked(desktop.resumeNoteJobs).mockResolvedValue();
+  vi.mocked(desktop.listNoteJobs).mockResolvedValue([]);
+  vi.mocked(desktop.listPlans).mockResolvedValue([]);
   vi.mocked(desktop.listNotes).mockResolvedValue([]);
   vi.mocked(desktop.listMemories).mockResolvedValue([]);
   vi.mocked(desktop.editMemory).mockResolvedValue({
@@ -182,26 +247,22 @@ describe("native conversation lifecycle", () => {
     expect(
       screen.queryByText(/Visible before locking|Late private text/),
     ).not.toBeInTheDocument();
+    vi.mocked(desktop.getProviderSettings).mockResolvedValue({
+      provider: "ollama" as const,
+      baseUrl: "http://127.0.0.1:11434",
+      model: "synthetic-model",
+      remoteDataConsent: false,
+      credentialPresent: false,
+      revision: 2,
+    });
     fireEvent.change(screen.getByLabelText("Your passphrase"), {
       target: { value: "synthetic-passphrase" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Unlock your vault" }));
     await screen.findByRole("textbox", { name: "Your message" });
-    expect(screen.queryByText("Ollama on loopback")).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox", { name: "Your message" }), {
       target: { value: "A new turn after unlocking." },
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Set up model connection" }),
-    );
-    expect(desktop.sendMessage).toHaveBeenCalledTimes(1);
-    expect(
-      screen.queryByRole("combobox", { name: "Model" }),
-    ).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
-    await screen.findByText("Ollama is ready");
-    expect(desktop.listModels).toHaveBeenCalledTimes(2);
-    fireEvent.click(screen.getByRole("button", { name: "Done" }));
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     expect(desktop.sendMessage).toHaveBeenCalledTimes(2);
     await act(async () => {
@@ -222,24 +283,28 @@ describe("native conversation lifecycle", () => {
     });
   });
 
-  it("stops before pending session creation can invoke inference and restores the draft", async () => {
-    vi.mocked(desktop.listSessions).mockResolvedValue([]);
-    const creation = deferred<Session>();
-    vi.mocked(desktop.createSession).mockReturnValue(creation.promise);
-    await openConnectedApp();
-    submit("A synthetic unsent thought.");
-    fireEvent.click(screen.getByRole("button", { name: "Stop reply" }));
-    await act(async () => {
-      creation.resolve(session);
-      await creation.promise;
+  it("frees the composer when the reply finishes while notes continue", async () => {
+    const turn = deferred<void>();
+    let emit: ((event: TurnEvent) => void) | undefined;
+    vi.mocked(desktop.sendMessage).mockImplementation(({ onEvent }) => {
+      emit = onEvent;
+      return turn.promise;
     });
-    expect(desktop.sendMessage).not.toHaveBeenCalled();
-    expect(screen.getByRole("textbox", { name: "Your message" })).toHaveValue(
-      "A synthetic unsent thought.",
+    await openConnectedApp();
+    submit("A synthetic thought.");
+    act(() =>
+      emit?.({ type: "finished", messageId: "reply", status: "complete" }),
     );
-    expect(
-      screen.getByRole("button", { name: "Send message" }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop reply" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Your message" })).toBeEnabled();
+    act(() =>
+      emit?.({ type: "notes", messageId: "reply", status: "updating" }),
+    );
+    expect(screen.getByRole("textbox", { name: "Your message" })).toBeEnabled();
+    await act(async () => {
+      turn.resolve();
+      await turn.promise;
+    });
   });
 
   it("retries cancellation when the native turn becomes available after Stop", async () => {
@@ -291,6 +356,107 @@ describe("native conversation lifecycle", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Connection unavailable.",
     );
+  });
+
+  it("does not let an older completed turn clear a newer active reply", async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    let firstEvent: ((event: TurnEvent) => void) | undefined;
+    let secondEvent: ((event: TurnEvent) => void) | undefined;
+    vi.mocked(desktop.sendMessage)
+      .mockImplementationOnce(({ onEvent }) => {
+        firstEvent = onEvent;
+        return first.promise;
+      })
+      .mockImplementationOnce(({ onEvent }) => {
+        secondEvent = onEvent;
+        return second.promise;
+      });
+    await openConnectedApp();
+    submit("First synthetic turn.");
+    act(() =>
+      firstEvent?.({
+        type: "finished",
+        messageId: "first-reply",
+        status: "complete",
+      }),
+    );
+    submit("Second synthetic turn.");
+    act(() =>
+      secondEvent?.({
+        type: "message",
+        message: {
+          id: "second-reply",
+          sessionId: session.id,
+          role: "assistant",
+          content: "The newer reply is still running.",
+          status: "streaming",
+          createdAt: session.createdAt,
+        },
+      }),
+    );
+    await act(async () => {
+      first.resolve();
+      await first.promise;
+    });
+    expect(
+      screen.getByRole("button", { name: "Stop reply" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("The newer reply is still running."),
+    ).toBeInTheDocument();
+    await act(async () => {
+      second.resolve();
+      await second.promise;
+    });
+  });
+
+  it("opens a generic reminder from the native due-plan array", async () => {
+    let notify: ((plans: DuePlan[]) => void) | undefined;
+    vi.mocked(desktop.onPlannedSessionDue).mockImplementation(
+      async (listener) => {
+        notify = listener;
+        return () => {};
+      },
+    );
+    render(<App />);
+    await screen.findByRole("heading", { name: "Good morning." });
+    act(() =>
+      notify?.([
+        {
+          id: "synthetic-plan",
+          notifications: true,
+          scheduledAt: "2026-09-16T12:00:00Z",
+        },
+      ]),
+    );
+    expect(
+      screen.getByRole("heading", { name: "A planned session is ready" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Your planned session is ready."),
+    ).toBeInTheDocument();
+  });
+
+  it("wakes a future failed note job that remains retryable", async () => {
+    const job = {
+      messageId: "synthetic-reply",
+      status: "failed" as const,
+      attemptCount: 1,
+      nextAttemptAt: new Date(Date.now() + 30).toISOString(),
+      memoryEnabled: true,
+      notesEnabled: true,
+      provider: "ollama" as const,
+      model: "synthetic-model",
+      createdAt: "2026-09-16T10:00:00Z",
+      updatedAt: "2026-09-16T10:00:00Z",
+    };
+    vi.mocked(desktop.listNoteJobs)
+      .mockResolvedValueOnce([job])
+      .mockResolvedValueOnce([job])
+      .mockResolvedValue([]);
+    render(<App />);
+    await waitFor(() => expect(desktop.resumeNoteJobs).toHaveBeenCalledOnce());
   });
 });
 
@@ -399,7 +565,20 @@ describe("conversation controls", () => {
   it("keeps conversation drafts separate while switching sessions", async () => {
     vi.mocked(desktop.listSessions).mockResolvedValue([session, secondSession]);
     vi.mocked(desktop.listMessages).mockResolvedValue([]);
+    vi.mocked(desktop.getProviderSettings).mockResolvedValue({
+      provider: "ollama",
+      baseUrl: "http://127.0.0.1:11434",
+      model: "synthetic-model",
+      remoteDataConsent: false,
+      credentialPresent: false,
+      revision: 2,
+    });
     render(<App />);
+    fireEvent.click(
+      (
+        await screen.findAllByRole("button", { name: /Monday conversation/ })
+      )[0]!,
+    );
     const composer = await screen.findByRole("textbox", {
       name: "Your message",
     });
@@ -538,8 +717,12 @@ describe("demo and notebook", () => {
       isDemo: true,
     });
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Open demo" }));
-    await screen.findByText("Demo workspace · Synthetic data only");
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Explore with example conversations",
+      }),
+    );
+    await screen.findByRole("heading", { name: "Good morning." });
     expect(desktop.openDemo).toHaveBeenCalledWith("demo", "openmind-demo-2026");
     expect(desktop.createVault).not.toHaveBeenCalled();
   });
@@ -561,7 +744,12 @@ describe("demo and notebook", () => {
     ]);
     render(<App />);
     fireEvent.click(
-      await screen.findByRole("button", {
+      (
+        await screen.findAllByRole("button", { name: /Monday conversation/ })
+      )[0]!,
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
         name: "Delete conversation",
       }),
     );
@@ -573,7 +761,9 @@ describe("demo and notebook", () => {
       expect(desktop.deleteSession).toHaveBeenCalledWith(session.id),
     );
     await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      expect(
+        screen.queryByRole("heading", { name: "Delete conversation?" }),
+      ).not.toBeInTheDocument(),
     );
     expect(screen.queryByText(session.title)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Your notes" }));
@@ -881,35 +1071,38 @@ describe("ChatGPT demo consent", () => {
     ]);
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
-      target: { value: "codex" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: "Model connection" }));
+    fireEvent.click(screen.getByRole("button", { name: /Online provider/ }));
   }
   it("requires explicit consent for messages and note updates", async () => {
     await chooseCodex();
     const consent = screen.getByRole("checkbox", {
-      name: "I agree to send this demo context to OpenAI.",
+      name: "I agree to send this data to this provider.",
     });
     expect(consent).not.toBeChecked();
-    fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
-    await screen.findByText("ChatGPT via Codex is ready");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Find available models" }),
+    );
+    await screen.findByDisplayValue("synthetic-codex-model");
+    expect(
+      screen.getByRole("button", { name: /Save and check connection/ }),
+    ).toBeDisabled();
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "I agree to send this data to this provider.",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /Save and check connection/ }),
+    );
+    await screen.findByText("Connection saved. Ready for a conversation.");
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /Monday conversation/ })[0]!,
+    );
     fireEvent.change(screen.getByRole("textbox", { name: "Your message" }), {
       target: { value: "A synthetic remote thought." },
     });
-    fireEvent.keyDown(screen.getByRole("textbox", { name: "Your message" }), {
-      key: "Enter",
-    });
-    expect(desktop.sendMessage).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Done" }));
-    fireEvent.click(screen.getByRole("button", { name: "Update notes" }));
-    expect(desktop.retryNotes).not.toHaveBeenCalled();
-    fireEvent.click(
-      screen.getByRole("checkbox", {
-        name: "I agree to send this demo context to OpenAI.",
-      }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Done" }));
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() =>
       expect(desktop.sendMessage).toHaveBeenCalledWith(
@@ -927,13 +1120,13 @@ describe("ChatGPT demo consent", () => {
     vi.mocked(desktop.listCodexModels).mockReturnValue(discovery.promise);
     fireEvent.click(
       screen.getByRole("checkbox", {
-        name: "I agree to send this demo context to OpenAI.",
+        name: "I agree to send this data to this provider.",
       }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
-    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
-      target: { value: "ollama" },
-    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Find available models" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /On this device/ }));
     await act(async () => {
       discovery.resolve([{ name: "stale-remote-model", size: 0 }]);
       await discovery.promise;
@@ -941,12 +1134,10 @@ describe("ChatGPT demo consent", () => {
     expect(
       screen.queryByRole("combobox", { name: "Model" }),
     ).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
-      target: { value: "codex" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: /Online provider/ }));
     expect(
       screen.getByRole("checkbox", {
-        name: "I agree to send this demo context to OpenAI.",
+        name: "I agree to send this data to this provider.",
       }),
     ).not.toBeChecked();
   });

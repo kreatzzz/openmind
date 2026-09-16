@@ -1,11 +1,24 @@
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    app_settings::{LineWidth, NoteJob, ProviderSettings, ReadingSettings},
+    lifecycle::{self, BackupSummary},
     models::{Message, MessageRole, MessageStatus, Session},
     notes::{MemoryRecord, NotePatch, NotesInput, UserNote},
+    retrieval::{
+        embed_local_ollama, embed_local_ollama_after_verification, verify_local_ollama_model,
+        ContextBudget, EmbeddingConfiguration, MemoryIndexStatus, RetrievalOptions,
+        RetrievalResult,
+    },
     vault::Vault,
 };
 
@@ -20,6 +33,27 @@ pub enum ProviderKind {
     #[default]
     Ollama,
     Codex,
+    #[serde(rename = "openaiCompatible")]
+    OpenAiCompatible,
+}
+
+impl ProviderKind {
+    pub(crate) fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::Codex => "codex",
+            Self::OpenAiCompatible => "openai_compatible",
+        }
+    }
+
+    pub(crate) fn from_db_value(value: &str) -> Option<Self> {
+        match value {
+            "ollama" => Some(Self::Ollama),
+            "codex" => Some(Self::Codex),
+            "openai_compatible" => Some(Self::OpenAiCompatible),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -66,7 +100,7 @@ pub enum NotesStatus {
 pub const DEMO_ID: &str = "demo";
 pub const DEMO_PASSPHRASE: &str = "openmind-demo-2026";
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultStatus {
     pub exists: bool,
@@ -77,11 +111,17 @@ pub struct VaultStatus {
 struct ActiveTurn {
     message_id: String,
     cancel: CancellationToken,
+    private: bool,
 }
 
 struct ActiveNotes {
     attempt_id: String,
     message_id: String,
+    cancel: CancellationToken,
+}
+
+struct ActiveMemoryWork {
+    id: String,
     cancel: CancellationToken,
 }
 
@@ -102,12 +142,54 @@ pub struct FinishedTurn {
     pub notes: Result<Option<PreparedNotes>, String>,
 }
 
-#[derive(Default)]
 struct State {
     vault: Option<Vault>,
     active: Option<ActiveTurn>,
     notes_active: Option<ActiveNotes>,
+    memory_work: Option<ActiveMemoryWork>,
     is_demo: bool,
+    vault_epoch: u64,
+    private_sessions: HashMap<String, PrivateSession>,
+    last_activity: Instant,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            vault: None,
+            active: None,
+            notes_active: None,
+            memory_work: None,
+            is_demo: false,
+            private_sessions: HashMap::new(),
+            last_activity: Instant::now(),
+            vault_epoch: 0,
+        }
+    }
+}
+
+struct PrivateSession {
+    session: Session,
+    messages: Vec<Message>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleSettings {
+    pub idle_lock_minutes: Option<u32>,
+    pub retention_days: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneResult {
+    pub sessions_deleted: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RestoreResult {
+    pub status: VaultStatus,
+    pub summary: BackupSummary,
 }
 
 pub struct Engine {
@@ -123,7 +205,72 @@ pub struct PreparedTurn {
     pub cancel: CancellationToken,
 }
 
+/// Retrieved context plus the vault/session revisions that authorized it.
+/// `prepare_turn_with_memory` validates these fields while holding the engine
+/// lock so a correction, deletion, permission change, or vault lock can never
+/// dispatch stale remembered context.
+pub struct TurnMemoryContext {
+    session_id: String,
+    context: String,
+    vault_epoch: u64,
+    session_revision: Option<i64>,
+    retrieval_epoch: Option<i64>,
+    private: bool,
+}
+
 impl Engine {
+    pub fn list_plans(&self) -> Result<Vec<crate::scheduler::SessionPlan>, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your workspace first.")?
+            .list_plans()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn create_plan(
+        &self,
+        input: crate::scheduler::PlanInput,
+    ) -> Result<crate::scheduler::SessionPlan, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your workspace first.")?
+            .create_plan(input)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn remove_plan(&self, id: &str, revision: i64) -> Result<(), String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your workspace first.")?
+            .remove_plan(id, revision)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn enable_plan(
+        &self,
+        id: &str,
+        enabled: bool,
+        revision: i64,
+    ) -> Result<crate::scheduler::SessionPlan, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your workspace first.")?
+            .enable_plan(id, enabled, revision)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn poll_plans(&self) -> Result<Vec<crate::scheduler::DuePlan>, String> {
+        let mut state = self.state()?;
+        match state.vault.as_mut() {
+            Some(vault) => vault.poll_plans().map_err(|error| error.to_string()),
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub fn new(directory: PathBuf) -> Self {
         Self {
             directory,
@@ -149,14 +296,19 @@ impl Engine {
     /// Called once when the renderer mounts; an old channel cannot be reattached.
     pub fn reconnect_renderer(&self) -> Result<VaultStatus, String> {
         let mut state = self.state()?;
+        // A renderer reload is a privacy boundary. Clear every transient
+        // conversation, including completed or otherwise idle sessions.
+        state.private_sessions.clear();
         if let Some(active) = state.active.take() {
             active.cancel.cancel();
-            state
-                .vault
-                .as_mut()
-                .ok_or("The vault is locked.")?
-                .finish_assistant_message(&active.message_id, MessageStatus::Interrupted)
-                .map_err(|error| error.to_string())?;
+            if !active.private {
+                state
+                    .vault
+                    .as_mut()
+                    .ok_or("The vault is locked.")?
+                    .finish_assistant_message(&active.message_id, MessageStatus::Interrupted)
+                    .map_err(|error| error.to_string())?;
+            }
         }
         if let Some(notes) = state.notes_active.take() {
             notes.cancel.cancel();
@@ -199,6 +351,7 @@ impl Engine {
         seed_demo(&mut vault).map_err(|error| error.to_string())?;
         state.vault = Some(vault);
         state.is_demo = true;
+        state.vault_epoch = state.vault_epoch.wrapping_add(1);
         Ok(VaultStatus {
             exists: true,
             unlocked: true,
@@ -219,11 +372,16 @@ impl Engine {
         .map_err(|error| error.to_string())?;
         state.vault = Some(vault);
         state.is_demo = false;
+        state.last_activity = Instant::now();
+        state.vault_epoch = state.vault_epoch.wrapping_add(1);
         Ok(())
     }
 
     pub fn lock(&self) -> Result<(), String> {
         let mut state = self.state()?;
+        if let Some(work) = state.memory_work.take() {
+            work.cancel.cancel();
+        }
         if let Some(active) = state.active.take() {
             active.cancel.cancel();
             if let Some(vault) = state.vault.as_mut() {
@@ -238,6 +396,8 @@ impl Engine {
             }
         }
         state.is_demo = false;
+        state.private_sessions.clear();
+        state.vault_epoch = state.vault_epoch.wrapping_add(1);
         // Release the vault even if the final status could not be persisted.
         // Opening it again recovers unfinished messages as interrupted.
         state.vault.take();
@@ -263,11 +423,109 @@ impl Engine {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>, String> {
-        self.state()?
+        let state = self.state()?;
+        let mut sessions = state
             .vault
             .as_ref()
             .ok_or("Unlock your vault first.")?
             .list_sessions()
+            .map_err(|error| error.to_string())?;
+        sessions.extend(
+            state
+                .private_sessions
+                .values()
+                .map(|private| private.session.clone()),
+        );
+        sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        Ok(sessions)
+    }
+
+    pub fn provider_settings(&self) -> Result<ProviderSettings, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .provider_settings()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn provider_api_key(&self) -> Result<Option<zeroize::Zeroizing<String>>, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .provider_api_key()
+            .map_err(|error| error.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_provider_settings(
+        &self,
+        provider: ProviderKind,
+        base_url: &str,
+        model: &str,
+        remote_data_consent: bool,
+        expected_revision: i64,
+        api_key: Option<&str>,
+        clear_api_key: bool,
+    ) -> Result<ProviderSettings, String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop current model work before changing provider settings.".into());
+        }
+        state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .update_provider_settings(
+                provider,
+                base_url,
+                model,
+                remote_data_consent,
+                expected_revision,
+                api_key,
+                clear_api_key,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn reading_settings(&self) -> Result<ReadingSettings, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .reading_settings()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn update_reading_settings(
+        &self,
+        text_scale_percent: u16,
+        line_width: LineWidth,
+        reduce_motion: bool,
+        enter_to_send: bool,
+        expected_revision: i64,
+    ) -> Result<ReadingSettings, String> {
+        self.state()?
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .update_reading_settings(
+                text_scale_percent,
+                line_width,
+                reduce_motion,
+                enter_to_send,
+                expected_revision,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn list_note_jobs(&self) -> Result<Vec<NoteJob>, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .list_note_jobs()
             .map_err(|error| error.to_string())
     }
 
@@ -278,6 +536,33 @@ impl Engine {
             .ok_or("Unlock your vault first.")?
             .create_session()
             .map_err(|error| error.to_string())
+    }
+
+    pub fn create_private_session(&self) -> Result<Session, String> {
+        let mut state = self.state()?;
+        if state.vault.is_none() {
+            return Err("Unlock your vault first.".into());
+        }
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let session = Session {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: "Private conversation".into(),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+            revision: 1,
+            memory_enabled: false,
+            notes_enabled: false,
+            private: true,
+        };
+        state.private_sessions.insert(
+            session.id.clone(),
+            PrivateSession {
+                session: session.clone(),
+                messages: Vec::new(),
+            },
+        );
+        state.last_activity = Instant::now();
+        Ok(session)
     }
 
     pub fn update_session(
@@ -292,6 +577,20 @@ impl Engine {
         if state.active.is_some() || state.notes_active.is_some() {
             return Err("Stop the current operation before changing conversation settings.".into());
         }
+        if let Some(private) = state.private_sessions.get_mut(id) {
+            if expected_revision != private.session.revision {
+                return Err("session revision conflict".into());
+            }
+            let title = title.trim();
+            if title.is_empty() || title.chars().count() > crate::vault::MAX_SESSION_TITLE_CHARS {
+                return Err("invalid input: session title".into());
+            }
+            private.session.title = title.into();
+            private.session.revision += 1;
+            private.session.updated_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            return Ok(private.session.clone());
+        }
         state
             .vault
             .as_mut()
@@ -305,6 +604,9 @@ impl Engine {
         if state.active.is_some() || state.notes_active.is_some() {
             return Err("Stop the current operation before deleting a conversation.".into());
         }
+        if state.private_sessions.remove(id).is_some() {
+            return Ok(());
+        }
         state
             .vault
             .as_mut()
@@ -314,7 +616,11 @@ impl Engine {
     }
 
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>, String> {
-        self.state()?
+        let state = self.state()?;
+        if let Some(private) = state.private_sessions.get(session_id) {
+            return Ok(private.messages.clone());
+        }
+        state
             .vault
             .as_ref()
             .ok_or("Unlock your vault first.")?
@@ -333,32 +639,146 @@ impl Engine {
         provider: ProviderKind,
         remote_consent: bool,
     ) -> Result<PreparedTurn, String> {
+        let provider_revision = self.provider_settings()?.revision;
+        let memory = self.retrieve_turn_memory_lexical(session_id, content)?;
+        self.prepare_turn_with_memory(
+            session_id,
+            content,
+            provider,
+            remote_consent,
+            provider_revision,
+            memory,
+        )
+    }
+
+    pub fn prepare_turn_with_memory(
+        &self,
+        session_id: &str,
+        content: &str,
+        provider: ProviderKind,
+        remote_consent: bool,
+        expected_provider_revision: i64,
+        memory: TurnMemoryContext,
+    ) -> Result<PreparedTurn, String> {
         let mut state = self.state()?;
-        authorize_provider(&state, provider, remote_consent)?;
+        let settings = state
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .provider_settings()
+            .map_err(|error| error.to_string())?;
+        if provider != settings.provider
+            || remote_consent != settings.remote_data_consent
+            || expected_provider_revision != settings.revision
+        {
+            return Err("Provider settings changed. Refresh settings before sending.".into());
+        }
+        authorize_provider(&state, &settings)?;
         if content.trim().is_empty() || content.len() > 6_000 {
             return Err("Write a message of up to 6,000 UTF-8 bytes before sending.".into());
         }
-        if state.active.is_some() || state.notes_active.is_some() {
+        if state.active.is_some() {
             return Err("Wait for the current reply to finish, or stop it first.".into());
+        }
+        if let Some(notes) = state.notes_active.take() {
+            notes.cancel.cancel();
+            state
+                .vault
+                .as_mut()
+                .ok_or("Unlock your vault first.")?
+                .defer_notes(&notes.message_id)
+                .map_err(|error| error.to_string())?;
+        }
+        if state.vault.is_none() {
+            return Err("Unlock your vault first.".into());
+        }
+        let current_vault_epoch = state.vault_epoch;
+        if let Some(private) = state.private_sessions.get_mut(session_id) {
+            if memory.session_id != session_id
+                || !memory.private
+                || !memory.context.is_empty()
+                || memory.vault_epoch != current_vault_epoch
+            {
+                return Err(
+                    "Conversation state changed while retrieving remembered context.".into(),
+                );
+            }
+            let history = recent_context(private.messages.clone(), 6_000);
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let user = Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.into(),
+                role: MessageRole::User,
+                content: content.into(),
+                status: MessageStatus::Complete,
+                created_at: now.clone(),
+            };
+            let assistant = Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.into(),
+                role: MessageRole::Assistant,
+                content: String::new(),
+                status: MessageStatus::Streaming,
+                created_at: now,
+            };
+            private.messages.push(user.clone());
+            private.messages.push(assistant.clone());
+            private.session.updated_at = assistant.created_at.clone();
+            let mut history = history;
+            history.push(user.clone());
+            let cancel = CancellationToken::new();
+            state.active = Some(ActiveTurn {
+                message_id: assistant.id.clone(),
+                cancel: cancel.clone(),
+                private: true,
+            });
+            state.last_activity = Instant::now();
+            return Ok(PreparedTurn {
+                user,
+                assistant,
+                history: recent_context(history, 6_000),
+                memory: String::new(),
+                cancel,
+            });
         }
         let vault = state.vault.as_mut().ok_or("Unlock your vault first.")?;
         let session = vault
             .get_session(session_id)
             .map_err(|error| error.to_string())?;
+        if memory.session_id != session_id
+            || memory.private
+            || memory.vault_epoch != current_vault_epoch
+            || memory.session_revision != Some(session.revision)
+            || memory.retrieval_epoch
+                != Some(vault.retrieval_epoch().map_err(|error| error.to_string())?)
+        {
+            return Err(
+                "Remembered context changed before the reply started. Try sending again.".into(),
+            );
+        }
         let mut history = vault
             .list_context_messages(session_id)
             .map_err(|error| error.to_string())?;
         // Check the session branch before touching the global memory bundle;
         // an off conversation must never retrieve saved context.
         let memory = if session.memory_enabled {
-            vault
-                .memory_context(1_000)
-                .map_err(|error| error.to_string())?
-        } else {
+            memory.context
+        } else if memory.context.is_empty() {
             String::new()
+        } else {
+            return Err("Memory permission changed before the reply started.".into());
         };
         let (user, assistant) = vault
             .begin_turn(session_id, content)
+            .map_err(|error| error.to_string())?;
+        vault
+            .set_notes_job_provider(
+                &assistant.id,
+                settings.provider,
+                &settings.base_url,
+                &settings.model,
+                settings.remote_data_consent,
+            )
             .map_err(|error| error.to_string())?;
         history.push(user.clone());
         // Always keep the current input intact. Saved context gets only spare room.
@@ -376,7 +796,9 @@ impl Engine {
         state.active = Some(ActiveTurn {
             message_id: assistant.id.clone(),
             cancel: cancel.clone(),
+            private: false,
         });
+        state.last_activity = Instant::now();
         Ok(PreparedTurn {
             user,
             assistant,
@@ -391,6 +813,31 @@ impl Engine {
         let active = state.active.as_ref().ok_or("The reply was stopped.")?;
         if active.message_id != message_id || active.cancel.is_cancelled() {
             return Err("The reply was stopped.".into());
+        }
+        if active.private {
+            let private = state
+                .private_sessions
+                .values_mut()
+                .find(|private| {
+                    private
+                        .messages
+                        .iter()
+                        .any(|message| message.id == message_id)
+                })
+                .ok_or("The private conversation ended.")?;
+            let message = private
+                .messages
+                .iter_mut()
+                .find(|message| message.id == message_id)
+                .ok_or("The private reply ended.")?;
+            if message.content.chars().count() + content.chars().count()
+                > crate::vault::MAX_ASSISTANT_MESSAGE_CHARS
+            {
+                return Err("The reply is too long.".into());
+            }
+            message.content.push_str(content);
+            state.last_activity = Instant::now();
+            return Ok(());
         }
         state
             .vault
@@ -423,7 +870,13 @@ impl Engine {
         let Some(status) = finish_turn_locked(&mut state, message_id, status)? else {
             return Ok(None);
         };
-        let notes = if status == MessageStatus::Complete {
+        let private = state.private_sessions.values().any(|private| {
+            private
+                .messages
+                .iter()
+                .any(|message| message.id == message_id)
+        });
+        let notes = if status == MessageStatus::Complete && !private {
             prepare_notes_locked(&mut state, message_id)
         } else {
             Ok(None)
@@ -449,12 +902,540 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
+    pub fn retrieve_memory_context(
+        &self,
+        query: &str,
+        options: &RetrievalOptions,
+    ) -> Result<RetrievalResult, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .retrieve_memory_context(query, options)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn memory_index_status(&self) -> Result<MemoryIndexStatus, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .memory_index_status()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn rebuild_memory_index(&self) -> Result<MemoryIndexStatus, String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop the current operation before rebuilding memory search.".into());
+        }
+        state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .rebuild_memory_index()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn memory_embedding_configuration(&self) -> Result<Option<EmbeddingConfiguration>, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .memory_embedding_configuration()
+            .map_err(|error| error.to_string())
+    }
+
+    fn begin_memory_work(&self, cancel: &CancellationToken) -> Result<String, String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() || state.memory_work.is_some() {
+            return Err("Wait for the current operation to finish, or stop it first.".into());
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        state.memory_work = Some(ActiveMemoryWork {
+            id: id.clone(),
+            cancel: cancel.clone(),
+        });
+        Ok(id)
+    }
+
+    fn finish_memory_work(&self, id: &str) {
+        if let Ok(mut state) = self.state() {
+            if state.memory_work.as_ref().is_some_and(|work| work.id == id) {
+                state.memory_work = None;
+            }
+        }
+    }
+
+    fn retrieve_turn_memory_lexical(
+        &self,
+        session_id: &str,
+        query: &str,
+    ) -> Result<TurnMemoryContext, String> {
+        if query.trim().is_empty() || query.len() > 6_000 {
+            return Err("Write a message of up to 6,000 UTF-8 bytes before sending.".into());
+        }
+        let state = self.state()?;
+        if state.private_sessions.contains_key(session_id) {
+            return Ok(TurnMemoryContext {
+                session_id: session_id.into(),
+                context: String::new(),
+                vault_epoch: state.vault_epoch,
+                session_revision: None,
+                retrieval_epoch: None,
+                private: true,
+            });
+        }
+        let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
+        let session = vault
+            .get_session(session_id)
+            .map_err(|error| error.to_string())?;
+        let retrieval_epoch = vault.retrieval_epoch().map_err(|error| error.to_string())?;
+        let context = if session.memory_enabled {
+            vault
+                .retrieve_memory_context(
+                    query,
+                    &ContextBudget::conservative_fallback(1_200, 8).retrieval_options(None),
+                )
+                .map_err(|error| error.to_string())?
+                .context
+        } else {
+            String::new()
+        };
+        Ok(TurnMemoryContext {
+            session_id: session_id.into(),
+            context,
+            vault_epoch: state.vault_epoch,
+            session_revision: Some(session.revision),
+            retrieval_epoch: Some(retrieval_epoch),
+            private: false,
+        })
+    }
+
+    /// Query-aware retrieval used by the real send path. Private and
+    /// memory-disabled conversations return before any embedding request.
+    pub async fn retrieve_turn_memory(
+        &self,
+        session_id: &str,
+        query: &str,
+    ) -> Result<TurnMemoryContext, String> {
+        if query.trim().is_empty() || query.len() > 6_000 {
+            return Err("Write a message of up to 6,000 UTF-8 bytes before sending.".into());
+        }
+        let work_id = uuid::Uuid::new_v4().to_string();
+        let cancel = CancellationToken::new();
+        let snapshot = {
+            let mut state = self.state()?;
+            if state.private_sessions.contains_key(session_id) {
+                return Ok(TurnMemoryContext {
+                    session_id: session_id.into(),
+                    context: String::new(),
+                    vault_epoch: state.vault_epoch,
+                    session_revision: None,
+                    retrieval_epoch: None,
+                    private: true,
+                });
+            }
+            if state.active.is_some() || state.memory_work.is_some() {
+                return Err("Wait for the current operation to finish, or stop it first.".into());
+            }
+            if let Some(notes) = state.notes_active.take() {
+                notes.cancel.cancel();
+                state
+                    .vault
+                    .as_mut()
+                    .ok_or("Unlock your vault first.")?
+                    .defer_notes(&notes.message_id)
+                    .map_err(|error| error.to_string())?;
+            }
+            let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
+            let session = vault
+                .get_session(session_id)
+                .map_err(|error| error.to_string())?;
+            let retrieval_epoch = vault.retrieval_epoch().map_err(|error| error.to_string())?;
+            let configuration = vault
+                .memory_embedding_configuration()
+                .map_err(|error| error.to_string())?;
+            if !session.memory_enabled || configuration.is_none() {
+                drop(state);
+                return self.retrieve_turn_memory_lexical(session_id, query);
+            }
+            let snapshot = (
+                state.vault_epoch,
+                session.revision,
+                retrieval_epoch,
+                configuration.expect("configuration checked"),
+            );
+            state.memory_work = Some(ActiveMemoryWork {
+                id: work_id.clone(),
+                cancel: cancel.clone(),
+            });
+            snapshot
+        };
+
+        let embedding =
+            embed_local_ollama(&snapshot.3.base_url, &snapshot.3.model, query, &cancel).await;
+        let mut state = self.state()?;
+        let matching_work = state
+            .memory_work
+            .as_ref()
+            .is_some_and(|work| work.id == work_id);
+        if matching_work {
+            state.memory_work = None;
+        }
+        if !matching_work || cancel.is_cancelled() || state.vault_epoch != snapshot.0 {
+            return Err("Remembered context retrieval was stopped.".into());
+        }
+        let vault = state
+            .vault
+            .as_ref()
+            .ok_or("The vault was locked while retrieving remembered context.")?;
+        let session = vault
+            .get_session(session_id)
+            .map_err(|error| error.to_string())?;
+        if !session.memory_enabled || session.revision != snapshot.1 {
+            return Err("Memory permission changed while retrieving remembered context.".into());
+        }
+        if vault.retrieval_epoch().map_err(|error| error.to_string())? != snapshot.2
+            || vault
+                .memory_embedding_configuration()
+                .map_err(|error| error.to_string())?
+                .as_ref()
+                != Some(&snapshot.3)
+        {
+            return Err("Remembered context changed while retrieval was running.".into());
+        }
+        let context = vault
+            .retrieve_memory_context(
+                query,
+                &ContextBudget::conservative_fallback(1_200, 8).retrieval_options(embedding.ok()),
+            )
+            .map_err(|error| error.to_string())?
+            .context;
+        Ok(TurnMemoryContext {
+            session_id: session_id.into(),
+            context,
+            vault_epoch: snapshot.0,
+            session_revision: Some(snapshot.1),
+            retrieval_epoch: Some(snapshot.2),
+            private: false,
+        })
+    }
+
+    /// Retrieve for one durable session. Permission and vault identity are
+    /// checked before any local model call and again before context dispatch.
+    pub async fn retrieve_configured_memory_context(
+        &self,
+        session_id: &str,
+        query: &str,
+        budget: ContextBudget,
+        cancel: &CancellationToken,
+    ) -> Result<RetrievalResult, String> {
+        let snapshot = {
+            let state = self.state()?;
+            let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
+            let session = vault
+                .get_session(session_id)
+                .map_err(|error| error.to_string())?;
+            if !session.memory_enabled {
+                return Ok(RetrievalResult::default());
+            }
+            (
+                state.vault_epoch,
+                session.revision,
+                vault.retrieval_epoch().map_err(|error| error.to_string())?,
+                vault
+                    .memory_embedding_configuration()
+                    .map_err(|error| error.to_string())?,
+            )
+        };
+        let Some(configuration) = snapshot.3.as_ref() else {
+            return self.retrieve_memory_context(query, &budget.retrieval_options(None));
+        };
+        let embedding =
+            embed_local_ollama(&configuration.base_url, &configuration.model, query, cancel)
+                .await
+                .map_err(|error| error.to_string())?;
+        let state = self.state()?;
+        if state.vault_epoch != snapshot.0 {
+            return Err("The vault changed while retrieving remembered context.".into());
+        }
+        let vault = state
+            .vault
+            .as_ref()
+            .ok_or("The vault was locked while retrieving remembered context.")?;
+        let session = vault
+            .get_session(session_id)
+            .map_err(|error| error.to_string())?;
+        if !session.memory_enabled || session.revision != snapshot.1 {
+            return Err("Memory permission changed while retrieving remembered context.".into());
+        }
+        if vault.retrieval_epoch().map_err(|error| error.to_string())? != snapshot.2
+            || vault
+                .memory_embedding_configuration()
+                .map_err(|error| error.to_string())?
+                .as_ref()
+                != Some(configuration)
+        {
+            return Err("Remembered context changed while retrieval was running.".into());
+        }
+        vault
+            .retrieve_memory_context(query, &budget.retrieval_options(Some(embedding)))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Build a bounded batch of record embeddings. Calls never select or
+    /// download a model, and every commit rechecks the memory revision.
+    pub async fn rebuild_local_memory_embeddings(
+        &self,
+        base_url: &str,
+        model: &str,
+        cancel: &CancellationToken,
+    ) -> Result<MemoryIndexStatus, String> {
+        let work_id = self.begin_memory_work(cancel)?;
+        let result = self
+            .rebuild_local_memory_embeddings_inner(base_url, model, cancel, &work_id)
+            .await;
+        self.finish_memory_work(&work_id);
+        result
+    }
+
+    async fn rebuild_local_memory_embeddings_inner(
+        &self,
+        base_url: &str,
+        model: &str,
+        cancel: &CancellationToken,
+        work_id: &str,
+    ) -> Result<MemoryIndexStatus, String> {
+        const MAX_BATCH: usize = 256;
+        let initial_vault_epoch = self.state()?.vault_epoch;
+        self.rebuild_memory_index()?;
+        verify_local_ollama_model(base_url, model)
+            .await
+            .map_err(|error| error.to_string())?;
+        let (vault_epoch, sources) = {
+            let state = self.state()?;
+            if state.vault_epoch != initial_vault_epoch {
+                return Err("The vault changed during memory search rebuild.".into());
+            }
+            if state.active.is_some() || state.notes_active.is_some() {
+                return Err("Stop the current operation before rebuilding memory search.".into());
+            }
+            let sources = state
+                .vault
+                .as_ref()
+                .ok_or("Unlock your vault first.")?
+                .pending_embedding_sources(model, MAX_BATCH)
+                .map_err(|error| error.to_string())?;
+            (state.vault_epoch, sources)
+        };
+        for source in sources {
+            let current = {
+                let state = self.state()?;
+                if state.vault_epoch != vault_epoch
+                    || cancel.is_cancelled()
+                    || !state
+                        .memory_work
+                        .as_ref()
+                        .is_some_and(|work| work.id == work_id)
+                {
+                    return Err("Memory search rebuild was stopped.".into());
+                }
+                if state.active.is_some() || state.notes_active.is_some() {
+                    return Err("Memory search rebuild was interrupted by active work.".into());
+                }
+                state
+                    .vault
+                    .as_ref()
+                    .ok_or("The vault was locked during memory search rebuild.")?
+                    .pending_embedding_sources(model, MAX_BATCH)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .any(|candidate| candidate == source)
+            };
+            if !current {
+                continue;
+            }
+            let embedding =
+                embed_local_ollama_after_verification(base_url, model, &source.content, cancel)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            let mut state = self.state()?;
+            if state.vault_epoch != vault_epoch {
+                return Err("The vault changed during memory search rebuild.".into());
+            }
+            if state.active.is_some() || state.notes_active.is_some() || cancel.is_cancelled() {
+                return Err("Memory search rebuild was interrupted by active work.".into());
+            }
+            state
+                .vault
+                .as_mut()
+                .ok_or("The vault was locked during memory search rebuild.")?
+                .store_memory_embedding(&source.memory_id, source.revision, &embedding)
+                .map_err(|error| error.to_string())?;
+        }
+        let pending = {
+            let state = self.state()?;
+            state
+                .vault
+                .as_ref()
+                .ok_or("Unlock your vault first.")?
+                .pending_embedding_sources(model, 1)
+                .map_err(|error| error.to_string())?
+        };
+        if pending.is_empty() {
+            let mut state = self.state()?;
+            if state.vault_epoch != vault_epoch
+                || cancel.is_cancelled()
+                || !state
+                    .memory_work
+                    .as_ref()
+                    .is_some_and(|work| work.id == work_id)
+            {
+                return Err("The vault changed during memory search rebuild.".into());
+            }
+            state
+                .vault
+                .as_mut()
+                .ok_or("Unlock your vault first.")?
+                .activate_memory_embedding_configuration(base_url, model)
+                .map_err(|error| error.to_string())?;
+        }
+        self.memory_index_status()
+    }
+
+    /// Maintain a small batch after corrections or newly accepted memories.
+    /// Failure leaves lexical retrieval available and the status degraded.
+    pub async fn update_configured_memory_embeddings(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<MemoryIndexStatus, String> {
+        let work_id = self.begin_memory_work(cancel)?;
+        let result = self
+            .update_configured_memory_embeddings_inner(cancel, &work_id)
+            .await;
+        self.finish_memory_work(&work_id);
+        result
+    }
+
+    async fn update_configured_memory_embeddings_inner(
+        &self,
+        cancel: &CancellationToken,
+        work_id: &str,
+    ) -> Result<MemoryIndexStatus, String> {
+        const MAX_BATCH: usize = 32;
+        let (vault_epoch, configuration, sources) = {
+            let state = self.state()?;
+            if state.active.is_some() || state.notes_active.is_some() {
+                return Err("Memory search maintenance waits until Openmind is idle.".into());
+            }
+            let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
+            let Some(configuration) = vault
+                .memory_embedding_configuration()
+                .map_err(|error| error.to_string())?
+            else {
+                return vault
+                    .memory_index_status()
+                    .map_err(|error| error.to_string());
+            };
+            let sources = vault
+                .pending_embedding_sources(&configuration.model, MAX_BATCH)
+                .map_err(|error| error.to_string())?;
+            (state.vault_epoch, configuration, sources)
+        };
+        verify_local_ollama_model(&configuration.base_url, &configuration.model)
+            .await
+            .map_err(|error| error.to_string())?;
+        for source in sources {
+            let current = {
+                let state = self.state()?;
+                if state.vault_epoch != vault_epoch
+                    || cancel.is_cancelled()
+                    || !state
+                        .memory_work
+                        .as_ref()
+                        .is_some_and(|work| work.id == work_id)
+                {
+                    return Err("Memory search maintenance was stopped.".into());
+                }
+                if state.active.is_some() || state.notes_active.is_some() {
+                    return Err("Memory search maintenance was interrupted by active work.".into());
+                }
+                let vault = state
+                    .vault
+                    .as_ref()
+                    .ok_or("The vault was locked during memory search maintenance.")?;
+                if vault
+                    .memory_embedding_configuration()
+                    .map_err(|error| error.to_string())?
+                    .as_ref()
+                    != Some(&configuration)
+                {
+                    return Err("Memory search configuration changed during maintenance.".into());
+                }
+                vault
+                    .pending_embedding_sources(&configuration.model, MAX_BATCH)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .any(|candidate| candidate == source)
+            };
+            if !current {
+                continue;
+            }
+            let embedding = embed_local_ollama_after_verification(
+                &configuration.base_url,
+                &configuration.model,
+                &source.content,
+                cancel,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let mut state = self.state()?;
+            if state.vault_epoch != vault_epoch {
+                return Err("The vault changed during memory search update.".into());
+            }
+            if state.active.is_some() || state.notes_active.is_some() || cancel.is_cancelled() {
+                return Err("Memory search maintenance was interrupted by active work.".into());
+            }
+            state
+                .vault
+                .as_mut()
+                .ok_or("The vault was locked during memory search update.")?
+                .store_memory_embedding(&source.memory_id, source.revision, &embedding)
+                .map_err(|error| error.to_string())?;
+        }
+        self.memory_index_status()
+    }
+
+    pub fn clear_memory_embedding_configuration(&self) -> Result<MemoryIndexStatus, String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() || state.memory_work.is_some() {
+            return Err("Stop the current operation before changing memory search.".into());
+        }
+        let vault = state.vault.as_mut().ok_or("Unlock your vault first.")?;
+        vault
+            .clear_memory_embedding_configuration()
+            .map_err(|error| error.to_string())?;
+        vault
+            .memory_index_status()
+            .map_err(|error| error.to_string())
+    }
+
     pub fn notes_permissions(&self, message_id: &str) -> Result<(bool, bool), String> {
         self.state()?
             .vault
             .as_ref()
             .ok_or("Unlock your vault first.")?
             .notes_permissions(message_id)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn notes_provider_settings(&self, message_id: &str) -> Result<ProviderSettings, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .notes_provider_settings(message_id)
             .map_err(|error| error.to_string())
     }
 
@@ -528,7 +1509,16 @@ impl Engine {
         // structured call is intentionally skipped, including remote-provider
         // authorization, because no source data will leave the vault.
         if call_required {
-            authorize_provider(&state, provider, remote_consent)?;
+            let settings = state
+                .vault
+                .as_ref()
+                .ok_or("Unlock your vault first.")?
+                .notes_provider_settings(message_id)
+                .map_err(|error| error.to_string())?;
+            if provider != settings.provider || remote_consent != settings.remote_data_consent {
+                return Err("The saved notes job has different provider settings.".into());
+            }
+            authorize_provider(&state, &settings)?;
         }
         prepare_notes_locked(&mut state, message_id)
     }
@@ -568,25 +1558,318 @@ impl Engine {
         if let Some(active) = &state.notes_active {
             active.cancel.cancel();
         }
+        if let Some(active) = &state.memory_work {
+            active.cancel.cancel();
+        }
         Ok(())
+    }
+
+    pub fn export_backup(
+        &self,
+        path: &Path,
+        backup_passphrase: &str,
+    ) -> Result<BackupSummary, String> {
+        let state = self.state()?;
+        if state.is_demo {
+            return Err("Demo data cannot be exported as a personal backup.".into());
+        }
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop current work before creating a backup.".into());
+        }
+        let destination_parent = path
+            .parent()
+            .ok_or("The backup path has no parent directory.")?
+            .canonicalize()
+            .map_err(|_| "The backup folder does not exist.")?;
+        if self.directory.exists()
+            && destination_parent.starts_with(
+                self.directory
+                    .canonicalize()
+                    .map_err(|_| "Could not resolve the vault directory.")?,
+            )
+        {
+            return Err("Save the backup outside Openmind's active vault folder.".into());
+        }
+        let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
+        lifecycle::export_backup(vault, path, backup_passphrase)
+    }
+
+    pub fn change_passphrase(&self, current: &str, new_passphrase: &str) -> Result<(), String> {
+        let state = self.state()?;
+        if state.is_demo {
+            return Err("The public demo passphrase cannot be changed.".into());
+        }
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop current work before changing the passphrase.".into());
+        }
+        state
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .change_passphrase(
+                &self.directory.join(crate::vault::ENVELOPE_FILE_NAME),
+                current,
+                new_passphrase,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn lifecycle_settings(&self) -> Result<LifecycleSettings, String> {
+        let state = self.state()?;
+        let (idle_lock_minutes, retention_days) = state
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .lifecycle_settings()
+            .map_err(|error| error.to_string())?;
+        Ok(LifecycleSettings {
+            idle_lock_minutes,
+            retention_days,
+        })
+    }
+
+    pub fn update_lifecycle_settings(
+        &self,
+        idle_lock_minutes: Option<u32>,
+        retention_days: Option<u32>,
+    ) -> Result<LifecycleSettings, String> {
+        let mut state = self.state()?;
+        let (idle_lock_minutes, retention_days) = state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .update_lifecycle_settings(idle_lock_minutes, retention_days)
+            .map_err(|error| error.to_string())?;
+        state.last_activity = Instant::now();
+        Ok(LifecycleSettings {
+            idle_lock_minutes,
+            retention_days,
+        })
+    }
+
+    pub fn record_activity(&self) -> Result<(), String> {
+        let mut state = self.state()?;
+        if state.vault.is_some() {
+            state.last_activity = Instant::now();
+        }
+        Ok(())
+    }
+
+    pub fn check_idle_lock(&self) -> Result<bool, String> {
+        let should_lock = {
+            let state = self.state()?;
+            let Some(vault) = state.vault.as_ref() else {
+                return Ok(false);
+            };
+            let (minutes, _) = vault
+                .lifecycle_settings()
+                .map_err(|error| error.to_string())?;
+            minutes.is_some_and(|minutes| {
+                state.last_activity.elapsed() >= Duration::from_secs(u64::from(minutes) * 60)
+            })
+        };
+        if should_lock {
+            self.lock()?;
+        }
+        Ok(should_lock)
+    }
+
+    pub fn prune_retention(&self, confirmation: &str) -> Result<PruneResult, String> {
+        if confirmation != "DELETE EXPIRED CONVERSATIONS" {
+            return Err("Type DELETE EXPIRED CONVERSATIONS to confirm.".into());
+        }
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop current work before pruning conversations.".into());
+        }
+        let sessions_deleted = state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .prune_retention()
+            .map_err(|error| error.to_string())?;
+        Ok(PruneResult { sessions_deleted })
+    }
+
+    pub fn restore_backup(
+        &self,
+        source: &Path,
+        passphrase: &str,
+        confirmation: &str,
+    ) -> Result<RestoreResult, String> {
+        if confirmation != "REPLACE MY OPENMIND VAULT" {
+            return Err("Type REPLACE MY OPENMIND VAULT to confirm.".into());
+        }
+        let mut state = self.state()?;
+        if state.vault.is_some() {
+            return Err("Lock the current vault before restoring a backup.".into());
+        }
+        if state.is_demo {
+            return Err("Close the demo before restoring a personal backup.".into());
+        }
+        let source = source
+            .canonicalize()
+            .map_err(|_| "The backup file was not found.")?;
+        if self.directory.exists()
+            && source.starts_with(
+                self.directory
+                    .canonicalize()
+                    .map_err(|_| "Could not resolve the vault directory.")?,
+            )
+        {
+            return Err(
+                "Move the backup outside Openmind's active vault folder before restoring it."
+                    .into(),
+            );
+        }
+        let (staging, summary) = lifecycle::stage_restore(&source, &self.directory, passphrase)?;
+        let parent = self
+            .directory
+            .parent()
+            .ok_or("The vault path has no parent directory.")?;
+        fs::create_dir_all(parent).map_err(|_| "Could not prepare the vault folder.")?;
+        if self.directory.exists()
+            && fs::symlink_metadata(&self.directory)
+                .map_err(|_| "Could not inspect the vault folder.")?
+                .file_type()
+                .is_symlink()
+        {
+            let _ = fs::remove_dir_all(&staging);
+            return Err("Refusing to replace a vault directory link.".into());
+        }
+        let rollback = parent.join(format!(
+            ".openmind-restore-rollback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let had_existing = self.directory.exists();
+        if had_existing {
+            fs::rename(&self.directory, &rollback)
+                .map_err(|_| "Could not preserve the current vault for rollback.")?;
+        }
+        if let Err(error) = fs::rename(&staging, &self.directory) {
+            if had_existing {
+                if let Err(rollback_error) = fs::rename(&rollback, &self.directory) {
+                    return Err(format!(
+                        "Could not install the restored vault: {error}. The original vault is preserved at {} but could not be returned to its normal location: {rollback_error}",
+                        rollback.display()
+                    ));
+                }
+            }
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("Could not install the restored vault: {error}"));
+        }
+        match Vault::open(&self.directory, passphrase) {
+            Ok(vault) => {
+                if had_existing {
+                    let _ = fs::remove_dir_all(&rollback);
+                }
+                state.vault = Some(vault);
+                state.private_sessions.clear();
+                state.last_activity = Instant::now();
+                Ok(RestoreResult {
+                    status: VaultStatus {
+                        exists: true,
+                        unlocked: true,
+                        is_demo: false,
+                    },
+                    summary,
+                })
+            }
+            Err(error) => {
+                let failed =
+                    parent.join(format!(".openmind-failed-restore-{}", uuid::Uuid::new_v4()));
+                if let Err(move_error) = fs::rename(&self.directory, &failed) {
+                    let preserved = if had_existing {
+                        format!(
+                            " The original vault is preserved at {}.",
+                            rollback.display()
+                        )
+                    } else {
+                        String::new()
+                    };
+                    return Err(format!(
+                        "The restored vault failed final verification: {error}. It remains at {} because recovery could not move it aside: {move_error}.{preserved}",
+                        self.directory.display()
+                    ));
+                }
+                if had_existing {
+                    if let Err(rollback_error) = fs::rename(&rollback, &self.directory) {
+                        return Err(format!(
+                            "The restored vault failed final verification: {error}. The original vault is preserved at {} and the failed restore is preserved at {}, but the original could not be returned to its normal location: {rollback_error}",
+                            rollback.display(),
+                            failed.display()
+                        ));
+                    }
+                    let _ = fs::remove_dir_all(&failed);
+                } else {
+                    return Err(format!(
+                        "The restored vault failed final verification: {error}. The recovered files are preserved at {}.",
+                        failed.display()
+                    ));
+                }
+                Err(format!(
+                    "The restored vault failed final verification: {error}"
+                ))
+            }
+        }
+    }
+
+    pub fn reset_vault(&self, confirmation: &str) -> Result<VaultStatus, String> {
+        if confirmation != "DELETE MY OPENMIND VAULT" {
+            return Err("Type DELETE MY OPENMIND VAULT to confirm.".into());
+        }
+        self.lock()?;
+        if self.directory.exists() {
+            let metadata = fs::symlink_metadata(&self.directory)
+                .map_err(|_| "Could not inspect the vault folder.")?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("Refusing to reset an unexpected vault path.".into());
+            }
+            let resolved = self
+                .directory
+                .canonicalize()
+                .map_err(|_| "Could not resolve the vault folder.")?;
+            let parent = self
+                .directory
+                .parent()
+                .ok_or("The vault path has no parent directory.")?
+                .canonicalize()
+                .map_err(|_| "Could not resolve the vault parent folder.")?;
+            if resolved.parent() != Some(parent.as_path()) {
+                return Err("Refusing to reset an unexpected vault path.".into());
+            }
+            fs::remove_dir_all(&resolved).map_err(|_| "Could not delete the complete vault.")?;
+        }
+        Ok(VaultStatus {
+            exists: false,
+            unlocked: false,
+            is_demo: false,
+        })
     }
 }
 
-fn authorize_provider(
-    state: &State,
-    provider: ProviderKind,
-    remote_consent: bool,
-) -> Result<(), String> {
-    if provider != ProviderKind::Codex {
-        return Ok(());
+fn authorize_provider(state: &State, settings: &ProviderSettings) -> Result<(), String> {
+    match settings.provider {
+        ProviderKind::Ollama => Ok(()),
+        ProviderKind::Codex => {
+            if !state.is_demo {
+                return Err(CODEX_DEMO_ONLY_ERROR.into());
+            }
+            if !settings.remote_data_consent {
+                return Err(CODEX_CONSENT_REQUIRED_ERROR.into());
+            }
+            Ok(())
+        }
+        ProviderKind::OpenAiCompatible => {
+            if !settings.remote_data_consent {
+                return Err("Confirm remote processing before using this provider.".into());
+            }
+            if !settings.credential_present {
+                return Err("Add an API key before using this provider.".into());
+            }
+            Ok(())
+        }
     }
-    if !state.is_demo {
-        return Err(CODEX_DEMO_ONLY_ERROR.into());
-    }
-    if !remote_consent {
-        return Err(CODEX_CONSENT_REQUIRED_ERROR.into());
-    }
-    Ok(())
 }
 
 fn finish_turn_locked(
@@ -605,6 +1888,26 @@ fn finish_turn_locked(
     } else {
         status
     };
+    if active.private {
+        let private = state
+            .private_sessions
+            .values_mut()
+            .find(|private| {
+                private
+                    .messages
+                    .iter()
+                    .any(|message| message.id == message_id)
+            })
+            .ok_or("The private conversation ended.")?;
+        let message = private
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+            .ok_or("The private reply ended.")?;
+        message.status = actual_status;
+        state.active.take();
+        return Ok(Some(actual_status));
+    }
     let result = state
         .vault
         .as_mut()
@@ -738,6 +2041,190 @@ mod tests {
             .expect("finished turn")
     }
 
+    #[tokio::test]
+    async fn disabled_session_never_calls_embedding_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let session = engine
+            .update_session(&session.id, &session.title, false, true, session.revision)
+            .unwrap();
+        let result = engine
+            .retrieve_configured_memory_context(
+                &session.id,
+                "synthetic query",
+                ContextBudget::conservative_fallback(1_200, 8),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("disabled retrieval");
+        assert!(result.context.is_empty());
+        assert!(result.matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn turn_retrieval_skips_private_and_memory_disabled_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+
+        let private = engine.create_private_session().unwrap();
+        let private_memory = engine
+            .retrieve_turn_memory(&private.id, "synthetic private query")
+            .await
+            .unwrap();
+        assert!(private_memory.private);
+        assert!(private_memory.context.is_empty());
+
+        let session = engine.create_session().unwrap();
+        let disabled = engine
+            .update_session(&session.id, &session.title, false, true, session.revision)
+            .unwrap();
+        let disabled_memory = engine
+            .retrieve_turn_memory(&disabled.id, "synthetic disabled query")
+            .await
+            .unwrap();
+        assert!(!disabled_memory.private);
+        assert!(disabled_memory.context.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_retrieval_is_rejected_before_transcript_or_context_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let memory = engine
+            .retrieve_turn_memory(&session.id, "synthetic query")
+            .await
+            .unwrap();
+
+        engine
+            .update_session(
+                &session.id,
+                &session.title,
+                false,
+                session.notes_enabled,
+                session.revision,
+            )
+            .unwrap();
+        let error = engine
+            .prepare_turn_with_memory(
+                &session.id,
+                "synthetic query",
+                ProviderKind::Ollama,
+                false,
+                engine.provider_settings().unwrap().revision,
+                memory,
+            )
+            .err()
+            .expect("stale retrieval must be rejected");
+        assert!(error.contains("Remembered context changed"));
+        assert!(engine.list_messages(&session.id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_revision_change_after_retrieval_prevents_old_destination_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let defaults = engine.provider_settings().unwrap();
+        let first = engine
+            .update_provider_settings(
+                ProviderKind::OpenAiCompatible,
+                "https://synthetic-one.invalid",
+                "synthetic-model-one",
+                true,
+                defaults.revision,
+                Some("synthetic-old-key"),
+                false,
+            )
+            .unwrap();
+        let memory = engine
+            .retrieve_turn_memory(&session.id, "synthetic query")
+            .await
+            .unwrap();
+
+        engine
+            .update_provider_settings(
+                ProviderKind::OpenAiCompatible,
+                "https://synthetic-two.invalid",
+                "synthetic-model-two",
+                true,
+                first.revision,
+                Some("synthetic-new-key"),
+                false,
+            )
+            .unwrap();
+        let error = engine
+            .prepare_turn_with_memory(
+                &session.id,
+                "synthetic query",
+                ProviderKind::OpenAiCompatible,
+                true,
+                first.revision,
+                memory,
+            )
+            .err()
+            .expect("provider revision change must stop dispatch");
+        assert_eq!(
+            error,
+            "Provider settings changed. Refresh settings before sending."
+        );
+        assert!(engine.list_messages(&session.id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_embedding_provider_degrades_to_relevant_lexical_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        {
+            let mut state = engine.state().unwrap();
+            state
+                .vault
+                .as_mut()
+                .unwrap()
+                .activate_memory_embedding_configuration(
+                    "http://127.0.0.1:1",
+                    "synthetic-unavailable-model",
+                )
+                .unwrap();
+        }
+        let session = engine.create_session().unwrap();
+        let finished = complete_turn(&engine, &session.id);
+        let notes = finished.notes.unwrap().unwrap();
+        engine
+            .finish_notes(&notes.attempt_id, Some(&synthetic_patch()))
+            .unwrap();
+
+        let memory = engine
+            .retrieve_turn_memory(&session.id, "synthetic walk")
+            .await
+            .expect("lexical fallback");
+        assert!(memory.context.contains("Take a synthetic walk"));
+    }
+
+    #[test]
+    fn lock_and_cancel_stop_registered_memory_model_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let cancel = CancellationToken::new();
+        let work_id = engine.begin_memory_work(&cancel).unwrap();
+
+        engine.cancel_turn().unwrap();
+        assert!(cancel.is_cancelled());
+        engine.finish_memory_work(&work_id);
+
+        let lock_cancel = CancellationToken::new();
+        engine.begin_memory_work(&lock_cancel).unwrap();
+        engine.lock().unwrap();
+        assert!(lock_cancel.is_cancelled());
+    }
+
     #[test]
     fn demo_is_separate_and_never_unlocks_or_replaces_personal_vault() {
         let temp = tempfile::tempdir().unwrap();
@@ -760,6 +2247,80 @@ mod tests {
         engine.lock().unwrap();
         engine.unlock(PASSPHRASE, false).unwrap();
         assert_eq!(engine.list_sessions().unwrap(), vec![personal]);
+    }
+
+    #[test]
+    fn private_conversation_never_enters_the_vault_and_disappears_on_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("vault");
+        let engine = Engine::new(directory.clone());
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let private = engine.create_private_session().unwrap();
+        assert!(private.private);
+        let canary = "SYNTHETIC-PRIVATE-CANARY-8e3a";
+        let turn = engine.prepare_turn(&private.id, canary).unwrap();
+        engine
+            .append_chunk(&turn.assistant.id, "Transient synthetic reply.")
+            .unwrap();
+        let finished = engine
+            .finish_turn_and_prepare_notes(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap()
+            .unwrap();
+        assert!(finished.notes.unwrap().is_none());
+        assert_eq!(engine.list_messages(&private.id).unwrap().len(), 2);
+        engine.lock().unwrap();
+        let bytes = std::fs::read(directory.join(crate::vault::DATABASE_FILE_NAME)).unwrap();
+        assert!(!bytes
+            .windows(canary.len())
+            .any(|window| window == canary.as_bytes()));
+        engine.unlock(PASSPHRASE, false).unwrap();
+        assert!(engine
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .all(|session| session.id != private.id));
+        assert!(engine.list_sessions().unwrap().is_empty());
+        assert!(engine.list_notes().unwrap().is_empty());
+        assert!(engine.list_memories().unwrap().is_empty());
+    }
+
+    #[test]
+    fn renderer_reconnect_clears_completed_private_conversations() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let private = engine.create_private_session().unwrap();
+        let turn = engine
+            .prepare_turn(&private.id, "Synthetic transient input.")
+            .unwrap();
+        engine
+            .append_chunk(&turn.assistant.id, "Synthetic transient reply.")
+            .unwrap();
+        engine
+            .finish_turn_and_prepare_notes(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap();
+
+        assert!(engine.reconnect_renderer().unwrap().unlocked);
+        assert!(engine
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .all(|session| session.id != private.id));
+        assert!(engine.list_messages(&private.id).is_err());
+    }
+
+    #[test]
+    fn reset_requires_exact_intent_and_removes_only_the_personal_vault() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("vault");
+        let engine = Engine::new(directory.clone());
+        engine.unlock(PASSPHRASE, true).unwrap();
+        engine.create_session().unwrap();
+        assert!(engine.reset_vault("delete").is_err());
+        assert!(Vault::exists(&directory));
+        let status = engine.reset_vault("DELETE MY OPENMIND VAULT").unwrap();
+        assert!(!status.exists);
+        assert!(!Vault::exists(&directory));
     }
 
     #[test]
@@ -863,11 +2424,6 @@ mod tests {
         assert!(second.status == MessageStatus::Complete);
         // The global saved bundle is skipped before retrieval for this
         // conversation, while its ordinary transcript remains available.
-        let turn_history_memory = engine
-            .prepare_turn(&session.id, "should be blocked while notes active")
-            .err()
-            .expect("notes work blocks another turn");
-        assert!(turn_history_memory.contains("current reply"));
         let second_notes = second.notes.unwrap().unwrap();
         assert!(!second_notes.input.memory_enabled);
         assert!(second_notes.input.notes_enabled);
@@ -1088,6 +2644,19 @@ mod tests {
             ProviderKind::Ollama
         );
 
+        let defaults = engine.provider_settings().unwrap();
+        let codex_settings = engine
+            .update_provider_settings(
+                ProviderKind::Codex,
+                "",
+                "synthetic-model",
+                true,
+                defaults.revision,
+                None,
+                false,
+            )
+            .unwrap();
+
         let error = engine
             .prepare_turn_with_provider(
                 &session.id,
@@ -1101,17 +2670,24 @@ mod tests {
         assert!(engine.list_messages(&session.id).unwrap().is_empty());
         assert_eq!(engine.require_demo().unwrap_err(), DEMO_REQUIRED_ERROR);
 
+        engine
+            .update_provider_settings(
+                ProviderKind::Ollama,
+                "http://127.0.0.1:11434",
+                "synthetic-model",
+                false,
+                codex_settings.revision,
+                None,
+                false,
+            )
+            .unwrap();
+
         let turn = engine
             .prepare_turn(&session.id, "A synthetic Ollama turn.")
             .unwrap();
         engine
             .finish_turn(&turn.assistant.id, MessageStatus::Complete)
             .unwrap();
-        let error = engine
-            .prepare_notes_with_provider(&turn.assistant.id, ProviderKind::Codex, true)
-            .err()
-            .expect("personal Codex notes should be rejected");
-        assert_eq!(error, CODEX_DEMO_ONLY_ERROR);
         let ollama_notes = engine
             .prepare_notes(&turn.assistant.id)
             .unwrap()
@@ -1123,6 +2699,18 @@ mod tests {
         assert!(engine.require_demo().is_ok());
         let demo_session = engine.list_sessions().unwrap().remove(0);
         let before = engine.list_messages(&demo_session.id).unwrap().len();
+        let defaults = engine.provider_settings().unwrap();
+        let no_consent = engine
+            .update_provider_settings(
+                ProviderKind::Codex,
+                "",
+                "synthetic-model",
+                false,
+                defaults.revision,
+                None,
+                false,
+            )
+            .unwrap();
         let error = engine
             .prepare_turn_with_provider(
                 &demo_session.id,
@@ -1137,6 +2725,18 @@ mod tests {
             engine.list_messages(&demo_session.id).unwrap().len(),
             before
         );
+
+        engine
+            .update_provider_settings(
+                ProviderKind::Codex,
+                "",
+                "synthetic-model",
+                true,
+                no_consent.revision,
+                None,
+                false,
+            )
+            .unwrap();
 
         let allowed = engine
             .prepare_turn_with_provider(
@@ -1172,7 +2772,6 @@ mod tests {
             .finish_turn(&turn.assistant.id, MessageStatus::Complete)
             .unwrap();
         let old = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
-        assert!(engine.prepare_turn(&session.id, "Another message").is_err());
         engine.lock().unwrap();
         assert!(old.cancel.is_cancelled());
         engine.unlock(PASSPHRASE, false).unwrap();
@@ -1218,25 +2817,21 @@ mod tests {
             .expect("notes reservation should succeed")
             .expect("completed turn should reserve notes");
 
-        assert!(engine
-            .prepare_turn(&session.id, "A second message")
-            .is_err());
-        engine.cancel_turn().unwrap();
-        assert!(notes.cancel.is_cancelled());
-        assert!(matches!(
-            engine.finish_notes(&notes.attempt_id, None).unwrap(),
-            Some(NotesStatus::Failed)
-        ));
-
-        let messages = engine.list_messages(&session.id).unwrap();
-        assert_eq!(messages[1].status, MessageStatus::Complete);
         let next = engine
             .prepare_turn(&session.id, "A second message")
             .unwrap();
+        assert!(notes.cancel.is_cancelled());
+        assert!(engine
+            .finish_notes(&notes.attempt_id, None)
+            .unwrap()
+            .is_none());
         engine.cancel_turn().unwrap();
         engine
             .finish_turn(&next.assistant.id, MessageStatus::Interrupted)
             .unwrap();
+
+        let messages = engine.list_messages(&session.id).unwrap();
+        assert_eq!(messages[1].status, MessageStatus::Complete);
     }
 
     #[test]
@@ -1418,5 +3013,161 @@ mod tests {
         let messages = engine.list_messages(&session.id).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].status, MessageStatus::Interrupted);
+    }
+
+    #[test]
+    fn foreground_turn_defers_notes_and_late_attempt_cannot_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let first = engine
+            .prepare_turn(&session.id, "I want to take a walk.")
+            .unwrap();
+        engine
+            .finish_turn(&first.assistant.id, MessageStatus::Complete)
+            .unwrap();
+        let notes = engine.prepare_notes(&first.assistant.id).unwrap().unwrap();
+
+        let second = engine
+            .prepare_turn(&session.id, "I also want to call a friend.")
+            .unwrap();
+        assert!(notes.cancel.is_cancelled());
+        assert_eq!(
+            engine
+                .finish_notes(&notes.attempt_id, Some(&synthetic_patch()))
+                .unwrap(),
+            None
+        );
+        let jobs = engine.list_note_jobs().unwrap();
+        let deferred = jobs
+            .iter()
+            .find(|job| job.message_id == first.assistant.id)
+            .unwrap();
+        assert_eq!(deferred.status, "pending");
+        assert_eq!(
+            deferred.last_error_code.as_deref(),
+            Some("foreground_preempted")
+        );
+        engine.cancel_turn().unwrap();
+        engine
+            .finish_turn(&second.assistant.id, MessageStatus::Interrupted)
+            .unwrap();
+        let retry = engine.prepare_notes(&first.assistant.id).unwrap().unwrap();
+        engine
+            .finish_notes(&retry.attempt_id, Some(&synthetic_patch()))
+            .unwrap();
+        assert_eq!(engine.list_notes().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn repeated_foreground_preemption_does_not_consume_provider_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let source = engine
+            .prepare_turn(&session.id, "I want to take a short walk.")
+            .unwrap();
+        engine
+            .finish_turn(&source.assistant.id, MessageStatus::Complete)
+            .unwrap();
+
+        for index in 0..4 {
+            let deferred = engine.prepare_notes(&source.assistant.id).unwrap().unwrap();
+            let foreground = engine
+                .prepare_turn(&session.id, &format!("Foreground turn {index}."))
+                .unwrap();
+            assert!(deferred.cancel.is_cancelled());
+            assert_eq!(
+                engine.finish_notes(&deferred.attempt_id, None).unwrap(),
+                None
+            );
+            engine
+                .finish_turn(&foreground.assistant.id, MessageStatus::Interrupted)
+                .unwrap();
+        }
+
+        let deferred_job = engine
+            .list_note_jobs()
+            .unwrap()
+            .into_iter()
+            .find(|job| job.message_id == source.assistant.id)
+            .unwrap();
+        assert_eq!(deferred_job.status, "pending");
+        assert_eq!(deferred_job.attempt_count, 0);
+
+        for _ in 0..3 {
+            let attempt = engine.prepare_notes(&source.assistant.id).unwrap().unwrap();
+            assert_eq!(
+                engine.finish_notes(&attempt.attempt_id, None).unwrap(),
+                Some(NotesStatus::Failed)
+            );
+        }
+        let error = match engine.prepare_notes(&source.assistant.id) {
+            Err(error) => error,
+            Ok(_) => panic!("provider failure limit should reject another attempt"),
+        };
+        assert!(error.contains("retry limit"));
+    }
+
+    #[test]
+    fn notes_retry_limit_is_bounded_and_reply_remains_complete() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let turn = engine
+            .prepare_turn(&session.id, "I want to take a short walk.")
+            .unwrap();
+        engine
+            .append_chunk(&turn.assistant.id, "That sounds concrete.")
+            .unwrap();
+        engine
+            .finish_turn(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap();
+        for _ in 0..3 {
+            let attempt = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
+            assert_eq!(
+                engine.finish_notes(&attempt.attempt_id, None).unwrap(),
+                Some(NotesStatus::Failed)
+            );
+        }
+        let error = match engine.prepare_notes(&turn.assistant.id) {
+            Err(error) => error,
+            Ok(_) => panic!("retry limit should reject another attempt"),
+        };
+        assert!(error.contains("retry limit"));
+        let messages = engine.list_messages(&session.id).unwrap();
+        assert_eq!(messages[1].status, MessageStatus::Complete);
+        assert_eq!(messages[1].content, "That sounds concrete.");
+        let job = engine.list_note_jobs().unwrap().remove(0);
+        assert_eq!(job.attempt_count, 3);
+        assert_eq!(job.status, "failed");
+    }
+
+    #[test]
+    fn notes_channel_failure_path_cannot_undo_saved_reply() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let turn = engine
+            .prepare_turn(&session.id, "I plan to read tonight.")
+            .unwrap();
+        engine
+            .append_chunk(&turn.assistant.id, "What will you read?")
+            .unwrap();
+        let finished = engine
+            .finish_turn_and_prepare_notes(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap()
+            .unwrap();
+        let notes = finished.notes.unwrap().unwrap();
+        // `execute_notes` takes this path if its renderer channel closes before
+        // the Updating event can be delivered.
+        engine.finish_notes(&notes.attempt_id, None).unwrap();
+        let saved = engine.list_messages(&session.id).unwrap();
+        assert_eq!(saved[1].status, MessageStatus::Complete);
+        assert_eq!(saved[1].content, "What will you read?");
     }
 }

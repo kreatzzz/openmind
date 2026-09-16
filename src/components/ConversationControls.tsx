@@ -124,7 +124,7 @@ export function ConversationControls({
 
         <p className="conversation-controls-note">
           {sample
-            ? "This browser demo is temporary; your controls reset when you close it."
+            ? "This example workspace is temporary; changes reset when you close it."
             : "In the desktop app, your conversation stays saved and can be used in replies here."}{" "}
           Turning a setting off also stops pending updates of that kind. Turning
           it on applies only to new messages.
@@ -147,7 +147,7 @@ export function ConversationControls({
             {saving
               ? "Saving…"
               : sample
-                ? "Save for this demo"
+                ? "Save for this example"
                 : "Save changes"}
           </button>
         </div>

@@ -1,4 +1,5 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface Session {
   id: string;
@@ -8,6 +9,7 @@ export interface Session {
   revision: number;
   memoryEnabled: boolean;
   notesEnabled: boolean;
+  private?: boolean;
 }
 
 export interface Message {
@@ -19,7 +21,44 @@ export interface Message {
   createdAt: string;
 }
 
-export type ProviderKind = "ollama" | "codex";
+export type ProviderKind = "ollama" | "codex" | "openaiCompatible";
+
+export interface ProviderSettings {
+  provider: ProviderKind;
+  baseUrl: string;
+  model: string;
+  remoteDataConsent: boolean;
+  credentialPresent: boolean;
+  revision: number;
+}
+export interface ReadingSettings {
+  textScalePercent: number;
+  lineWidth: "compact" | "comfortable" | "wide";
+  reduceMotion: boolean;
+  enterToSend: boolean;
+  revision: number;
+}
+export interface ProviderHealth {
+  provider: ProviderKind;
+  status: "ready" | "unavailable" | "authRequired" | "misconfigured";
+  destination: "local" | "remote";
+  model: string;
+  capabilities: { streaming: boolean; structuredNotes: boolean };
+  message?: string;
+}
+export interface NoteJob {
+  messageId: string;
+  status: "pending" | "running" | "complete" | "failed";
+  attemptCount: number;
+  nextAttemptAt?: string;
+  lastErrorCode?: string;
+  memoryEnabled: boolean;
+  notesEnabled: boolean;
+  provider: ProviderKind;
+  model: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface ModelInfo {
   name: string;
@@ -82,6 +121,59 @@ export type TurnEvent =
 
 export const isDesktop = isTauri();
 
+export interface SessionPlan {
+  id: string;
+  label: string;
+  localStart: string;
+  timezone: string;
+  recurrence: "once" | "daily" | "weekly";
+  notifications: boolean;
+  enabled: boolean;
+  nextAt: string;
+  revision: number;
+}
+export interface DuePlan {
+  id: string;
+  notifications: boolean;
+  scheduledAt: string;
+}
+export type PlanInput = Pick<
+  SessionPlan,
+  "label" | "localStart" | "timezone" | "recurrence" | "notifications"
+>;
+
+export interface LifecycleSettings {
+  idleLockMinutes: number | null;
+  retentionDays: number | null;
+}
+export interface BackupSummary {
+  createdAt: string;
+  sessions: number;
+  messages: number;
+}
+export interface RestoreResult {
+  status: VaultStatus;
+  summary: BackupSummary;
+}
+export interface MemoryEmbeddingConfiguration {
+  baseUrl: string;
+  model: string;
+}
+export interface MemoryIndexStatus {
+  state: "ready" | "degraded";
+  lexicalIndexed: number;
+  eligibleRecords: number;
+  semanticIndexed: number;
+  staleEmbeddings: number;
+  embeddingModels: string[];
+  lastRebuiltAt: string | null;
+  activeEmbedding: {
+    baseUrl: string;
+    model: string;
+    activatedAt: string;
+  } | null;
+}
+
 function native<T>(
   command: string,
   args?: Record<string, unknown>,
@@ -103,6 +195,96 @@ function native<T>(
 }
 
 export const desktop = {
+  onVaultLocked: (listener: () => void): Promise<UnlistenFn> =>
+    listen("vault-locked", listener),
+  onPlannedSessionDue: (
+    listener: (plans: DuePlan[]) => void,
+  ): Promise<UnlistenFn> =>
+    listen<DuePlan[]>("planned-session-due", (event) =>
+      listener(event.payload),
+    ),
+  getProviderSettings: () => native<ProviderSettings>("get_provider_settings"),
+  updateProviderSettings: (
+    settings: ProviderSettings,
+    apiKey?: string,
+    clearApiKey = false,
+  ) =>
+    native<ProviderSettings>("update_provider_settings", {
+      provider: settings.provider,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      remoteDataConsent: settings.remoteDataConsent,
+      expectedRevision: settings.revision,
+      apiKey,
+      clearApiKey,
+    }),
+  checkProviderHealth: () => native<ProviderHealth>("check_provider_health"),
+  getReadingSettings: () => native<ReadingSettings>("get_reading_settings"),
+  updateReadingSettings: (settings: ReadingSettings) =>
+    native<ReadingSettings>("update_reading_settings", {
+      ...settings,
+      expectedRevision: settings.revision,
+    }),
+  listNoteJobs: () => native<NoteJob[]>("list_note_jobs"),
+  async resumeNoteJobs(onEvent: (event: TurnEvent) => void): Promise<void> {
+    const channel = new Channel<TurnEvent>();
+    channel.onmessage = onEvent;
+    try {
+      await native<void>("resume_note_jobs", { onEvent: channel });
+    } finally {
+      channel.onmessage = () => {};
+    }
+  },
+  getLifecycleSettings: () =>
+    native<LifecycleSettings>("get_lifecycle_settings"),
+  updateLifecycleSettings: (
+    idleLockMinutes: number | null,
+    retentionDays: number | null,
+  ) =>
+    native<LifecycleSettings>("update_lifecycle_settings", {
+      idleLockMinutes,
+      retentionDays,
+    }),
+  getMemoryIndexStatus: () =>
+    native<MemoryIndexStatus>("get_memory_index_status"),
+  getMemoryEmbeddingConfiguration: () =>
+    native<MemoryEmbeddingConfiguration | null>(
+      "get_memory_embedding_configuration",
+    ),
+  rebuildMemoryIndex: (baseUrl: string, model: string) =>
+    native<MemoryIndexStatus>("rebuild_memory_index", { baseUrl, model }),
+  clearMemoryEmbeddingConfiguration: () =>
+    native<MemoryIndexStatus>("clear_memory_embedding_configuration"),
+  exportBackup: (path: string, backupPassphrase: string) =>
+    native<BackupSummary>("export_vault_backup", { path, backupPassphrase }),
+  restoreBackup: (
+    path: string,
+    backupPassphrase: string,
+    confirmation: string,
+  ) =>
+    native<RestoreResult>("restore_vault_backup", {
+      path,
+      backupPassphrase,
+      confirmation,
+    }),
+  changePassphrase: (currentPassphrase: string, newPassphrase: string) =>
+    native<void>("change_vault_passphrase", {
+      currentPassphrase,
+      newPassphrase,
+    }),
+  pruneRetention: (confirmation: string) =>
+    native<{ sessionsDeleted: number }>("prune_retention", { confirmation }),
+  resetVault: (confirmation: string) =>
+    native<VaultStatus>("reset_vault", { confirmation }),
+  createPrivateSession: () => native<Session>("create_private_session"),
+  recordActivity: () => native<void>("record_activity"),
+  listPlans: () => native<SessionPlan[]>("list_plans"),
+  createPlan: (input: PlanInput) =>
+    native<SessionPlan>("create_plan", { input }),
+  removePlan: (id: string, expectedRevision: number) =>
+    native<void>("remove_plan", { id, expectedRevision }),
+  enablePlan: (id: string, enabled: boolean, expectedRevision: number) =>
+    native<SessionPlan>("enable_plan", { id, enabled, expectedRevision }),
   getVaultStatus: () => native<VaultStatus>("get_vault_status"),
   openDemo: (loginId: string, passphrase: string) =>
     native<VaultStatus>("open_demo", { loginId, passphrase }),
