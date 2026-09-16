@@ -1,10 +1,17 @@
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     app_settings::{LineWidth, NoteJob, ProviderSettings, ReadingSettings},
+    lifecycle::{self, BackupSummary},
     models::{Message, MessageRole, MessageStatus, Session},
     notes::{MemoryRecord, NotePatch, NotesInput, UserNote},
     retrieval::{
@@ -92,7 +99,7 @@ pub enum NotesStatus {
 pub const DEMO_ID: &str = "demo";
 pub const DEMO_PASSPHRASE: &str = "openmind-demo-2026";
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultStatus {
     pub exists: bool,
@@ -103,6 +110,7 @@ pub struct VaultStatus {
 struct ActiveTurn {
     message_id: String,
     cancel: CancellationToken,
+    private: bool,
 }
 
 struct ActiveNotes {
@@ -128,12 +136,50 @@ pub struct FinishedTurn {
     pub notes: Result<Option<PreparedNotes>, String>,
 }
 
-#[derive(Default)]
 struct State {
     vault: Option<Vault>,
     active: Option<ActiveTurn>,
     notes_active: Option<ActiveNotes>,
     is_demo: bool,
+    private_sessions: HashMap<String, PrivateSession>,
+    last_activity: Instant,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            vault: None,
+            active: None,
+            notes_active: None,
+            is_demo: false,
+            private_sessions: HashMap::new(),
+            last_activity: Instant::now(),
+        }
+    }
+}
+
+struct PrivateSession {
+    session: Session,
+    messages: Vec<Message>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleSettings {
+    pub idle_lock_minutes: Option<u32>,
+    pub retention_days: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneResult {
+    pub sessions_deleted: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RestoreResult {
+    pub status: VaultStatus,
+    pub summary: BackupSummary,
 }
 
 pub struct Engine {
@@ -201,12 +247,16 @@ impl Engine {
         let mut state = self.state()?;
         if let Some(active) = state.active.take() {
             active.cancel.cancel();
-            state
-                .vault
-                .as_mut()
-                .ok_or("The vault is locked.")?
-                .finish_assistant_message(&active.message_id, MessageStatus::Interrupted)
-                .map_err(|error| error.to_string())?;
+            if active.private {
+                state.private_sessions.clear();
+            } else {
+                state
+                    .vault
+                    .as_mut()
+                    .ok_or("The vault is locked.")?
+                    .finish_assistant_message(&active.message_id, MessageStatus::Interrupted)
+                    .map_err(|error| error.to_string())?;
+            }
         }
         if let Some(notes) = state.notes_active.take() {
             notes.cancel.cancel();
@@ -269,6 +319,7 @@ impl Engine {
         .map_err(|error| error.to_string())?;
         state.vault = Some(vault);
         state.is_demo = false;
+        state.last_activity = Instant::now();
         Ok(())
     }
 
@@ -288,6 +339,7 @@ impl Engine {
             }
         }
         state.is_demo = false;
+        state.private_sessions.clear();
         // Release the vault even if the final status could not be persisted.
         // Opening it again recovers unfinished messages as interrupted.
         state.vault.take();
@@ -313,12 +365,21 @@ impl Engine {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>, String> {
-        self.state()?
+        let state = self.state()?;
+        let mut sessions = state
             .vault
             .as_ref()
             .ok_or("Unlock your vault first.")?
             .list_sessions()
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        sessions.extend(
+            state
+                .private_sessions
+                .values()
+                .map(|private| private.session.clone()),
+        );
+        sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        Ok(sessions)
     }
 
     pub fn provider_settings(&self) -> Result<ProviderSettings, String> {
@@ -419,6 +480,33 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
+    pub fn create_private_session(&self) -> Result<Session, String> {
+        let mut state = self.state()?;
+        if state.vault.is_none() {
+            return Err("Unlock your vault first.".into());
+        }
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let session = Session {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: "Private conversation".into(),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+            revision: 1,
+            memory_enabled: false,
+            notes_enabled: false,
+            private: true,
+        };
+        state.private_sessions.insert(
+            session.id.clone(),
+            PrivateSession {
+                session: session.clone(),
+                messages: Vec::new(),
+            },
+        );
+        state.last_activity = Instant::now();
+        Ok(session)
+    }
+
     pub fn update_session(
         &self,
         id: &str,
@@ -430,6 +518,20 @@ impl Engine {
         let mut state = self.state()?;
         if state.active.is_some() || state.notes_active.is_some() {
             return Err("Stop the current operation before changing conversation settings.".into());
+        }
+        if let Some(private) = state.private_sessions.get_mut(id) {
+            if expected_revision != private.session.revision {
+                return Err("session revision conflict".into());
+            }
+            let title = title.trim();
+            if title.is_empty() || title.chars().count() > crate::vault::MAX_SESSION_TITLE_CHARS {
+                return Err("invalid input: session title".into());
+            }
+            private.session.title = title.into();
+            private.session.revision += 1;
+            private.session.updated_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            return Ok(private.session.clone());
         }
         state
             .vault
@@ -444,6 +546,9 @@ impl Engine {
         if state.active.is_some() || state.notes_active.is_some() {
             return Err("Stop the current operation before deleting a conversation.".into());
         }
+        if state.private_sessions.remove(id).is_some() {
+            return Ok(());
+        }
         state
             .vault
             .as_mut()
@@ -453,7 +558,11 @@ impl Engine {
     }
 
     pub fn list_messages(&self, session_id: &str) -> Result<Vec<Message>, String> {
-        self.state()?
+        let state = self.state()?;
+        if let Some(private) = state.private_sessions.get(session_id) {
+            return Ok(private.messages.clone());
+        }
+        state
             .vault
             .as_ref()
             .ok_or("Unlock your vault first.")?
@@ -497,6 +606,48 @@ impl Engine {
                 .ok_or("Unlock your vault first.")?
                 .defer_notes(&notes.message_id)
                 .map_err(|error| error.to_string())?;
+        }
+        if state.vault.is_none() {
+            return Err("Unlock your vault first.".into());
+        }
+        if let Some(private) = state.private_sessions.get_mut(session_id) {
+            let history = recent_context(private.messages.clone(), 6_000);
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let user = Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.into(),
+                role: MessageRole::User,
+                content: content.into(),
+                status: MessageStatus::Complete,
+                created_at: now.clone(),
+            };
+            let assistant = Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.into(),
+                role: MessageRole::Assistant,
+                content: String::new(),
+                status: MessageStatus::Streaming,
+                created_at: now,
+            };
+            private.messages.push(user.clone());
+            private.messages.push(assistant.clone());
+            private.session.updated_at = assistant.created_at.clone();
+            let mut history = history;
+            history.push(user.clone());
+            let cancel = CancellationToken::new();
+            state.active = Some(ActiveTurn {
+                message_id: assistant.id.clone(),
+                cancel: cancel.clone(),
+                private: true,
+            });
+            state.last_activity = Instant::now();
+            return Ok(PreparedTurn {
+                user,
+                assistant,
+                history: recent_context(history, 6_000),
+                memory: String::new(),
+                cancel,
+            });
         }
         let vault = state.vault.as_mut().ok_or("Unlock your vault first.")?;
         let session = vault
@@ -542,7 +693,9 @@ impl Engine {
         state.active = Some(ActiveTurn {
             message_id: assistant.id.clone(),
             cancel: cancel.clone(),
+            private: false,
         });
+        state.last_activity = Instant::now();
         Ok(PreparedTurn {
             user,
             assistant,
@@ -557,6 +710,31 @@ impl Engine {
         let active = state.active.as_ref().ok_or("The reply was stopped.")?;
         if active.message_id != message_id || active.cancel.is_cancelled() {
             return Err("The reply was stopped.".into());
+        }
+        if active.private {
+            let private = state
+                .private_sessions
+                .values_mut()
+                .find(|private| {
+                    private
+                        .messages
+                        .iter()
+                        .any(|message| message.id == message_id)
+                })
+                .ok_or("The private conversation ended.")?;
+            let message = private
+                .messages
+                .iter_mut()
+                .find(|message| message.id == message_id)
+                .ok_or("The private reply ended.")?;
+            if message.content.chars().count() + content.chars().count()
+                > crate::vault::MAX_ASSISTANT_MESSAGE_CHARS
+            {
+                return Err("The reply is too long.".into());
+            }
+            message.content.push_str(content);
+            state.last_activity = Instant::now();
+            return Ok(());
         }
         state
             .vault
@@ -589,7 +767,13 @@ impl Engine {
         let Some(status) = finish_turn_locked(&mut state, message_id, status)? else {
             return Ok(None);
         };
-        let notes = if status == MessageStatus::Complete {
+        let private = state.private_sessions.values().any(|private| {
+            private
+                .messages
+                .iter()
+                .any(|message| message.id == message_id)
+        });
+        let notes = if status == MessageStatus::Complete && !private {
             prepare_notes_locked(&mut state, message_id)
         } else {
             Ok(None)
@@ -856,6 +1040,260 @@ impl Engine {
         }
         Ok(())
     }
+
+    pub fn export_backup(
+        &self,
+        path: &Path,
+        backup_passphrase: &str,
+    ) -> Result<BackupSummary, String> {
+        let state = self.state()?;
+        if state.is_demo {
+            return Err("Demo data cannot be exported as a personal backup.".into());
+        }
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop current work before creating a backup.".into());
+        }
+        let destination_parent = path
+            .parent()
+            .ok_or("The backup path has no parent directory.")?
+            .canonicalize()
+            .map_err(|_| "The backup folder does not exist.")?;
+        if self.directory.exists()
+            && destination_parent.starts_with(
+                self.directory
+                    .canonicalize()
+                    .map_err(|_| "Could not resolve the vault directory.")?,
+            )
+        {
+            return Err("Save the backup outside Openmind's active vault folder.".into());
+        }
+        let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
+        lifecycle::export_backup(vault, path, backup_passphrase)
+    }
+
+    pub fn change_passphrase(&self, current: &str, new_passphrase: &str) -> Result<(), String> {
+        let state = self.state()?;
+        if state.is_demo {
+            return Err("The public demo passphrase cannot be changed.".into());
+        }
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop current work before changing the passphrase.".into());
+        }
+        state
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .change_passphrase(
+                &self.directory.join(crate::vault::ENVELOPE_FILE_NAME),
+                current,
+                new_passphrase,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn lifecycle_settings(&self) -> Result<LifecycleSettings, String> {
+        let state = self.state()?;
+        let (idle_lock_minutes, retention_days) = state
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .lifecycle_settings()
+            .map_err(|error| error.to_string())?;
+        Ok(LifecycleSettings {
+            idle_lock_minutes,
+            retention_days,
+        })
+    }
+
+    pub fn update_lifecycle_settings(
+        &self,
+        idle_lock_minutes: Option<u32>,
+        retention_days: Option<u32>,
+    ) -> Result<LifecycleSettings, String> {
+        let mut state = self.state()?;
+        let (idle_lock_minutes, retention_days) = state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .update_lifecycle_settings(idle_lock_minutes, retention_days)
+            .map_err(|error| error.to_string())?;
+        state.last_activity = Instant::now();
+        Ok(LifecycleSettings {
+            idle_lock_minutes,
+            retention_days,
+        })
+    }
+
+    pub fn record_activity(&self) -> Result<(), String> {
+        let mut state = self.state()?;
+        if state.vault.is_some() {
+            state.last_activity = Instant::now();
+        }
+        Ok(())
+    }
+
+    pub fn check_idle_lock(&self) -> Result<bool, String> {
+        let should_lock = {
+            let state = self.state()?;
+            let Some(vault) = state.vault.as_ref() else {
+                return Ok(false);
+            };
+            let (minutes, _) = vault
+                .lifecycle_settings()
+                .map_err(|error| error.to_string())?;
+            minutes.is_some_and(|minutes| {
+                state.last_activity.elapsed() >= Duration::from_secs(u64::from(minutes) * 60)
+            })
+        };
+        if should_lock {
+            self.lock()?;
+        }
+        Ok(should_lock)
+    }
+
+    pub fn prune_retention(&self, confirmation: &str) -> Result<PruneResult, String> {
+        if confirmation != "DELETE EXPIRED CONVERSATIONS" {
+            return Err("Type DELETE EXPIRED CONVERSATIONS to confirm.".into());
+        }
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop current work before pruning conversations.".into());
+        }
+        let sessions_deleted = state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .prune_retention()
+            .map_err(|error| error.to_string())?;
+        Ok(PruneResult { sessions_deleted })
+    }
+
+    pub fn restore_backup(
+        &self,
+        source: &Path,
+        passphrase: &str,
+        confirmation: &str,
+    ) -> Result<RestoreResult, String> {
+        if confirmation != "REPLACE MY OPENMIND VAULT" {
+            return Err("Type REPLACE MY OPENMIND VAULT to confirm.".into());
+        }
+        let mut state = self.state()?;
+        if state.vault.is_some() {
+            return Err("Lock the current vault before restoring a backup.".into());
+        }
+        if state.is_demo {
+            return Err("Close the demo before restoring a personal backup.".into());
+        }
+        let source = source
+            .canonicalize()
+            .map_err(|_| "The backup file was not found.")?;
+        if self.directory.exists()
+            && source.starts_with(
+                self.directory
+                    .canonicalize()
+                    .map_err(|_| "Could not resolve the vault directory.")?,
+            )
+        {
+            return Err(
+                "Move the backup outside Openmind's active vault folder before restoring it."
+                    .into(),
+            );
+        }
+        let (staging, summary) = lifecycle::stage_restore(&source, &self.directory, passphrase)?;
+        let parent = self
+            .directory
+            .parent()
+            .ok_or("The vault path has no parent directory.")?;
+        fs::create_dir_all(parent).map_err(|_| "Could not prepare the vault folder.")?;
+        if self.directory.exists()
+            && fs::symlink_metadata(&self.directory)
+                .map_err(|_| "Could not inspect the vault folder.")?
+                .file_type()
+                .is_symlink()
+        {
+            let _ = fs::remove_dir_all(&staging);
+            return Err("Refusing to replace a vault directory link.".into());
+        }
+        let rollback = parent.join(format!(
+            ".openmind-restore-rollback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let had_existing = self.directory.exists();
+        if had_existing {
+            fs::rename(&self.directory, &rollback)
+                .map_err(|_| "Could not preserve the current vault for rollback.")?;
+        }
+        if let Err(error) = fs::rename(&staging, &self.directory) {
+            if had_existing {
+                let _ = fs::rename(&rollback, &self.directory);
+            }
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("Could not install the restored vault: {error}"));
+        }
+        match Vault::open(&self.directory, passphrase) {
+            Ok(vault) => {
+                if had_existing {
+                    let _ = fs::remove_dir_all(&rollback);
+                }
+                state.vault = Some(vault);
+                state.private_sessions.clear();
+                state.last_activity = Instant::now();
+                Ok(RestoreResult {
+                    status: VaultStatus {
+                        exists: true,
+                        unlocked: true,
+                        is_demo: false,
+                    },
+                    summary,
+                })
+            }
+            Err(error) => {
+                let failed =
+                    parent.join(format!(".openmind-failed-restore-{}", uuid::Uuid::new_v4()));
+                let _ = fs::rename(&self.directory, &failed);
+                if had_existing {
+                    let _ = fs::rename(&rollback, &self.directory);
+                }
+                let _ = fs::remove_dir_all(failed);
+                Err(format!(
+                    "The restored vault failed final verification: {error}"
+                ))
+            }
+        }
+    }
+
+    pub fn reset_vault(&self, confirmation: &str) -> Result<VaultStatus, String> {
+        if confirmation != "DELETE MY OPENMIND VAULT" {
+            return Err("Type DELETE MY OPENMIND VAULT to confirm.".into());
+        }
+        self.lock()?;
+        if self.directory.exists() {
+            let metadata = fs::symlink_metadata(&self.directory)
+                .map_err(|_| "Could not inspect the vault folder.")?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("Refusing to reset an unexpected vault path.".into());
+            }
+            let resolved = self
+                .directory
+                .canonicalize()
+                .map_err(|_| "Could not resolve the vault folder.")?;
+            let parent = self
+                .directory
+                .parent()
+                .ok_or("The vault path has no parent directory.")?
+                .canonicalize()
+                .map_err(|_| "Could not resolve the vault parent folder.")?;
+            if resolved.parent() != Some(parent.as_path()) {
+                return Err("Refusing to reset an unexpected vault path.".into());
+            }
+            fs::remove_dir_all(&resolved).map_err(|_| "Could not delete the complete vault.")?;
+        }
+        Ok(VaultStatus {
+            exists: false,
+            unlocked: false,
+            is_demo: false,
+        })
+    }
 }
 
 fn authorize_provider(state: &State, settings: &ProviderSettings) -> Result<(), String> {
@@ -898,6 +1336,26 @@ fn finish_turn_locked(
     } else {
         status
     };
+    if active.private {
+        let private = state
+            .private_sessions
+            .values_mut()
+            .find(|private| {
+                private
+                    .messages
+                    .iter()
+                    .any(|message| message.id == message_id)
+            })
+            .ok_or("The private conversation ended.")?;
+        let message = private
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+            .ok_or("The private reply ended.")?;
+        message.status = actual_status;
+        state.active.take();
+        return Ok(Some(actual_status));
+    }
     let result = state
         .vault
         .as_mut()
@@ -1053,6 +1511,55 @@ mod tests {
         engine.lock().unwrap();
         engine.unlock(PASSPHRASE, false).unwrap();
         assert_eq!(engine.list_sessions().unwrap(), vec![personal]);
+    }
+
+    #[test]
+    fn private_conversation_never_enters_the_vault_and_disappears_on_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("vault");
+        let engine = Engine::new(directory.clone());
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let private = engine.create_private_session().unwrap();
+        assert!(private.private);
+        let canary = "SYNTHETIC-PRIVATE-CANARY-8e3a";
+        let turn = engine.prepare_turn(&private.id, canary).unwrap();
+        engine
+            .append_chunk(&turn.assistant.id, "Transient synthetic reply.")
+            .unwrap();
+        let finished = engine
+            .finish_turn_and_prepare_notes(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap()
+            .unwrap();
+        assert!(finished.notes.unwrap().is_none());
+        assert_eq!(engine.list_messages(&private.id).unwrap().len(), 2);
+        engine.lock().unwrap();
+        let bytes = std::fs::read(directory.join(crate::vault::DATABASE_FILE_NAME)).unwrap();
+        assert!(!bytes
+            .windows(canary.len())
+            .any(|window| window == canary.as_bytes()));
+        engine.unlock(PASSPHRASE, false).unwrap();
+        assert!(engine
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .all(|session| session.id != private.id));
+        assert!(engine.list_sessions().unwrap().is_empty());
+        assert!(engine.list_notes().unwrap().is_empty());
+        assert!(engine.list_memories().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reset_requires_exact_intent_and_removes_only_the_personal_vault() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("vault");
+        let engine = Engine::new(directory.clone());
+        engine.unlock(PASSPHRASE, true).unwrap();
+        engine.create_session().unwrap();
+        assert!(engine.reset_vault("delete").is_err());
+        assert!(Vault::exists(&directory));
+        let status = engine.reset_vault("DELETE MY OPENMIND VAULT").unwrap();
+        assert!(!status.exists);
+        assert!(!Vault::exists(&directory));
     }
 
     #[test]

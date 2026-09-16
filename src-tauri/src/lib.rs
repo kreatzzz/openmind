@@ -1,6 +1,7 @@
 pub mod app_settings;
 pub mod codex;
 pub mod engine;
+pub mod lifecycle;
 pub mod models;
 pub mod notes;
 pub mod provider;

@@ -1,4 +1,5 @@
 use std::{
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -13,7 +14,11 @@ use crate::{
         ProviderHealthStatus, ProviderSettings, ReadingSettings,
     },
     codex,
-    engine::{Engine, NotesStatus, PreparedNotes, ProviderKind, TurnEvent, VaultStatus},
+    engine::{
+        Engine, LifecycleSettings, NotesStatus, PreparedNotes, ProviderKind, PruneResult,
+        RestoreResult, TurnEvent, VaultStatus,
+    },
+    lifecycle::BackupSummary,
     models::{Message, MessageRole, MessageStatus, Session},
     notes::{MemoryRecord, UserNote},
     provider::{self, ChatMessage, ModelInfo, ProviderError},
@@ -492,6 +497,97 @@ async fn lock_vault(state: State<'_, DesktopState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn create_private_session(state: State<'_, DesktopState>) -> Result<Session, String> {
+    blocking(&state, Engine::create_private_session).await
+}
+
+#[tauri::command]
+async fn export_vault_backup(
+    state: State<'_, DesktopState>,
+    path: PathBuf,
+    backup_passphrase: String,
+) -> Result<BackupSummary, String> {
+    let passphrase = Zeroizing::new(backup_passphrase);
+    blocking(&state, move |engine| {
+        engine.export_backup(&path, &passphrase)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn restore_vault_backup(
+    state: State<'_, DesktopState>,
+    path: PathBuf,
+    backup_passphrase: String,
+    confirmation: String,
+) -> Result<RestoreResult, String> {
+    let passphrase = Zeroizing::new(backup_passphrase);
+    blocking(&state, move |engine| {
+        engine.restore_backup(&path, &passphrase, &confirmation)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn change_vault_passphrase(
+    state: State<'_, DesktopState>,
+    current_passphrase: String,
+    new_passphrase: String,
+) -> Result<(), String> {
+    let current = Zeroizing::new(current_passphrase);
+    let new_passphrase = Zeroizing::new(new_passphrase);
+    blocking(&state, move |engine| {
+        engine.change_passphrase(&current, &new_passphrase)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_lifecycle_settings(
+    state: State<'_, DesktopState>,
+) -> Result<LifecycleSettings, String> {
+    blocking(&state, Engine::lifecycle_settings).await
+}
+
+#[tauri::command]
+async fn update_lifecycle_settings(
+    state: State<'_, DesktopState>,
+    idle_lock_minutes: Option<u32>,
+    retention_days: Option<u32>,
+) -> Result<LifecycleSettings, String> {
+    blocking(&state, move |engine| {
+        engine.update_lifecycle_settings(idle_lock_minutes, retention_days)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn record_activity(state: State<'_, DesktopState>) -> Result<(), String> {
+    blocking(&state, Engine::record_activity).await
+}
+
+#[tauri::command]
+async fn check_idle_lock(state: State<'_, DesktopState>) -> Result<bool, String> {
+    blocking(&state, Engine::check_idle_lock).await
+}
+
+#[tauri::command]
+async fn prune_retention(
+    state: State<'_, DesktopState>,
+    confirmation: String,
+) -> Result<PruneResult, String> {
+    blocking(&state, move |engine| engine.prune_retention(&confirmation)).await
+}
+
+#[tauri::command]
+async fn reset_vault(
+    state: State<'_, DesktopState>,
+    confirmation: String,
+) -> Result<VaultStatus, String> {
+    blocking(&state, move |engine| engine.reset_vault(&confirmation)).await
+}
+
+#[tauri::command]
 async fn list_sessions(state: State<'_, DesktopState>) -> Result<Vec<Session>, String> {
     blocking(&state, Engine::list_sessions).await
 }
@@ -757,6 +853,17 @@ pub fn run() {
         .setup(|app| {
             let directory = app.path().app_data_dir()?.join("vault");
             let engine = Arc::new(Engine::new(directory));
+            let monitor = Arc::downgrade(&engine);
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(15));
+                let Some(engine) = monitor.upgrade() else {
+                    break;
+                };
+                if engine.check_idle_lock().unwrap_or(false) {
+                    let _ = app_handle.emit("vault-locked", ());
+                }
+            });
             app.manage(DesktopState(Arc::clone(&engine)));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -799,6 +906,16 @@ pub fn run() {
             create_vault,
             unlock_vault,
             lock_vault,
+            create_private_session,
+            export_vault_backup,
+            restore_vault_backup,
+            change_vault_passphrase,
+            get_lifecycle_settings,
+            update_lifecycle_settings,
+            record_activity,
+            check_idle_lock,
+            prune_retention,
+            reset_vault,
             list_sessions,
             create_session,
             update_session,
@@ -814,6 +931,15 @@ pub fn run() {
                 let _ = window.state::<DesktopState>().0.lock();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("Could not start the Openmind desktop application");
+        .build(tauri::generate_context!())
+        .expect("Could not build the Openmind desktop application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Resumed) {
+                let engine = &app.state::<DesktopState>().0;
+                if engine.status().is_ok_and(|status| status.unlocked) {
+                    let _ = engine.lock();
+                    let _ = app.emit("vault-locked", ());
+                }
+            }
+        });
 }

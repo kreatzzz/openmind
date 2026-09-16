@@ -39,7 +39,7 @@ pub const MAX_ASSISTANT_CHUNK_CHARS: usize = 32_000;
 pub const MAX_ASSISTANT_MESSAGE_CHARS: usize = 200_000;
 pub const MAX_SESSION_TITLE_CHARS: usize = 120;
 
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 const DB_KEY_LENGTH: usize = 32;
 const ENVELOPE_SALT_LENGTH: usize = 16;
 const ENVELOPE_NONCE_LENGTH: usize = 24;
@@ -286,6 +286,10 @@ impl Vault {
         let lock_file = acquire_lock(dir)?;
         let database_path = dir.join(DATABASE_FILE_NAME);
         let envelope_path = dir.join(ENVELOPE_FILE_NAME);
+        let previous_envelope_path = dir.join(format!(".{ENVELOPE_FILE_NAME}.previous"));
+        if !envelope_path.exists() && previous_envelope_path.exists() {
+            fs::rename(&previous_envelope_path, &envelope_path)?;
+        }
         match (database_path.exists(), envelope_path.exists()) {
             (false, false) => return Err(VaultError::VaultNotFound),
             (true, false) | (false, true) => return Err(VaultError::VaultIncomplete),
@@ -297,15 +301,40 @@ impl Vault {
             db_key.zeroize();
             return Err(VaultError::CorruptDatabase);
         }
-
+        let migration_backup = dir.join(".vault.db.pre-migration");
+        let version = match read_schema_version(&database_path, &db_key) {
+            Ok(version) => version,
+            Err(_) if migration_backup.exists() => {
+                cleanup_sqlite_files(&database_path);
+                fs::copy(&migration_backup, &database_path)?;
+                read_schema_version(&database_path, &db_key)?
+            }
+            Err(error) => return Err(error),
+        };
+        if version < SCHEMA_VERSION as i64 && !migration_backup.exists() {
+            copy_file_durable(&database_path, &migration_backup)?;
+        }
         let connection = match open_connection(&database_path, &db_key, false) {
             Ok(connection) => connection,
+            Err(first_error) if migration_backup.exists() => {
+                cleanup_sqlite_files(&database_path);
+                fs::copy(&migration_backup, &database_path)?;
+                match open_connection(&database_path, &db_key, false) {
+                    Ok(connection) => connection,
+                    Err(_) => {
+                        db_key.zeroize();
+                        return Err(first_error);
+                    }
+                }
+            }
             Err(error) => {
                 db_key.zeroize();
                 return Err(error);
             }
         };
+        let _ = fs::remove_file(migration_backup);
         recover_interrupted(&connection)?;
+        let _ = fs::remove_file(previous_envelope_path);
 
         Ok(Self {
             connection,
@@ -538,6 +567,106 @@ impl Vault {
         Ok(())
     }
 
+    pub(crate) fn backup_parts(
+        &self,
+        snapshot_path: &Path,
+        backup_passphrase: &str,
+    ) -> Result<(Vec<u8>, u64, u64)> {
+        validate_passphrase(backup_passphrase)?;
+        if snapshot_path.exists() {
+            return Err(VaultError::VaultExists);
+        }
+        self.connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        self.connection
+            .execute("VACUUM INTO ?1", [snapshot_path.to_string_lossy().as_ref()])?;
+        if has_sqlite_header(snapshot_path)? {
+            cleanup_sqlite_files(snapshot_path);
+            return Err(VaultError::EncryptionUnavailable);
+        }
+        let verification = open_connection(snapshot_path, &self.db_key, false)?;
+        let integrity: String =
+            verification.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            drop(verification);
+            cleanup_sqlite_files(snapshot_path);
+            return Err(VaultError::CorruptDatabase);
+        }
+        drop(verification);
+        let sessions = self
+            .connection
+            .query_row("SELECT count(*) FROM sessions", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        let messages = self
+            .connection
+            .query_row("SELECT count(*) FROM messages", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        Ok((
+            encode_envelope(backup_passphrase, &self.db_key)?,
+            sessions as u64,
+            messages as u64,
+        ))
+    }
+
+    pub(crate) fn change_passphrase(
+        &self,
+        envelope_path: &Path,
+        current_passphrase: &str,
+        new_passphrase: &str,
+    ) -> Result<()> {
+        validate_passphrase(current_passphrase)?;
+        validate_passphrase(new_passphrase)?;
+        let current_key = decode_envelope(current_passphrase, envelope_path)?;
+        if current_key.as_ref() != self.db_key.as_ref() {
+            return Err(VaultError::InvalidPassphrase);
+        }
+        atomic_replace(
+            envelope_path,
+            &encode_envelope(new_passphrase, &self.db_key)?,
+        )
+    }
+
+    pub(crate) fn lifecycle_settings(&self) -> Result<(Option<u32>, Option<u32>)> {
+        self.connection.query_row(
+            "SELECT idle_lock_minutes, retention_days FROM lifecycle_settings WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(Into::into)
+    }
+
+    pub(crate) fn update_lifecycle_settings(
+        &mut self,
+        idle_lock_minutes: Option<u32>,
+        retention_days: Option<u32>,
+    ) -> Result<(Option<u32>, Option<u32>)> {
+        if idle_lock_minutes.is_some_and(|value| !(1..=1440).contains(&value)) {
+            return Err(VaultError::InvalidInput("idle lock minutes"));
+        }
+        if retention_days.is_some_and(|value| !(1..=36500).contains(&value)) {
+            return Err(VaultError::InvalidInput("retention days"));
+        }
+        self.connection.execute(
+            "UPDATE lifecycle_settings SET idle_lock_minutes = ?1, retention_days = ?2 WHERE singleton = 1",
+            params![idle_lock_minutes, retention_days],
+        )?;
+        self.lifecycle_settings()
+    }
+
+    pub(crate) fn prune_retention(&mut self) -> Result<u64> {
+        let (_, retention_days) = self.lifecycle_settings()?;
+        let Some(days) = retention_days else {
+            return Ok(0);
+        };
+        let cutoff = Utc::now() - chrono::Duration::days(i64::from(days));
+        let deleted = self.connection.execute(
+            "DELETE FROM sessions WHERE updated_at < ?1",
+            [cutoff.to_rfc3339_opts(SecondsFormat::Millis, true)],
+        )?;
+        Ok(deleted as u64)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let mut statement = self.connection.prepare(
             "SELECT id, title, created_at, updated_at, revision,
@@ -571,6 +700,7 @@ impl Vault {
             revision: 1,
             memory_enabled: true,
             notes_enabled: true,
+            private: false,
         };
 
         let transaction = self.connection.transaction()?;
@@ -1908,6 +2038,7 @@ fn session_from_row(row: &Row<'_>) -> rusqlite::Result<Session> {
         revision,
         memory_enabled: db_bool_from_row(row, 5)?,
         notes_enabled: db_bool_from_row(row, 6)?,
+        private: false,
     })
 }
 
@@ -2452,9 +2583,11 @@ fn initialize_schema(connection: &Connection) -> Result<()> {
              ON messages (session_id, created_at, id);
          {notes_schema}
          {settings_schema}
+         {lifecycle_schema}
          PRAGMA user_version = {SCHEMA_VERSION};",
         notes_schema = notes_schema_sql(),
         settings_schema = settings_schema_sql(),
+        lifecycle_schema = lifecycle_schema_sql(),
     );
     connection.execute_batch(&schema)?;
     Ok(())
@@ -2560,6 +2693,38 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> Resul
         }
     }
     Ok(false)
+}
+
+fn read_schema_version(path: &Path, db_key: &[u8; DB_KEY_LENGTH]) -> Result<i64> {
+    let connection = Connection::open(path).map_err(|_| VaultError::Database)?;
+    configure_connection(&connection, db_key)?;
+    let version = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|_| VaultError::CorruptDatabase)?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    Ok(version)
+}
+
+fn copy_file_durable(source: &Path, destination: &Path) -> Result<()> {
+    let mut input = File::open(source)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    let _ = sync_parent(destination.parent());
+    Ok(())
+}
+
+fn lifecycle_schema_sql() -> &'static str {
+    "CREATE TABLE IF NOT EXISTS lifecycle_settings (
+         singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+         idle_lock_minutes INTEGER CHECK (idle_lock_minutes IS NULL OR idle_lock_minutes BETWEEN 1 AND 1440),
+         retention_days INTEGER CHECK (retention_days IS NULL OR retention_days BETWEEN 1 AND 36500)
+     );
+     INSERT OR IGNORE INTO lifecycle_settings (singleton, idle_lock_minutes, retention_days)
+     VALUES (1, NULL, NULL);"
 }
 
 fn memory_records_table_sql() -> String {
@@ -2669,6 +2834,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             transaction.execute_batch(&notes_schema_sql())?;
             add_session_settings(&transaction)?;
             add_reliability_schema(&transaction)?;
+            transaction.execute_batch(lifecycle_schema_sql())?;
             transaction.execute(
                 "INSERT INTO notes_jobs
                  (assistant_message_id, status, created_at, updated_at)
@@ -2713,6 +2879,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             add_reliability_schema(&transaction)?;
             transaction.execute_batch(retrieval_schema_sql())?;
             rebuild_retrieval_in_migration(&transaction)?;
+            transaction.execute_batch(lifecycle_schema_sql())?;
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             transaction.commit()?;
             Ok(())
@@ -2724,15 +2891,19 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             add_reliability_schema(&transaction)?;
             transaction.execute_batch(retrieval_schema_sql())?;
             rebuild_retrieval_in_migration(&transaction)?;
+            transaction.execute_batch(lifecycle_schema_sql())?;
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             transaction.commit()?;
             Ok(())
         }
-        4 | 5 => {
+        4..=6 => {
             let transaction = connection.unchecked_transaction()?;
             add_reliability_schema(&transaction)?;
-            transaction.execute_batch(retrieval_schema_sql())?;
-            rebuild_retrieval_in_migration(&transaction)?;
+            if version < 6 {
+                transaction.execute_batch(retrieval_schema_sql())?;
+                rebuild_retrieval_in_migration(&transaction)?;
+            }
+            transaction.execute_batch(lifecycle_schema_sql())?;
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             transaction.commit()?;
             Ok(())
@@ -2826,12 +2997,12 @@ fn validate_schema(connection: &Connection) -> Result<()> {
                  ('sessions', 'messages', 'notes_jobs', 'user_notes', 'memory_records',
                   'memory_exclusions', 'provider_settings', 'reading_settings',
                   'memory_fts', 'memory_embeddings', 'memory_view_memberships',
-                  'memory_report_times', 'memory_index_state')",
+                  'memory_report_times', 'memory_index_state', 'lifecycle_settings')",
             [],
             |row| row.get(0),
         )
         .map_err(|_| VaultError::CorruptDatabase)?;
-    if table_count != 13 {
+    if table_count != 14 {
         return Err(VaultError::CorruptDatabase);
     }
     Ok(())
@@ -3050,6 +3221,43 @@ fn atomic_write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     write_result
 }
 
+fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or(VaultError::InvalidInput("vault path has no parent"))?;
+    let temporary = temporary_path(path);
+    let previous = path.with_file_name(format!(
+        ".{}.previous",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("vault.key")
+    ));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        if previous.exists() {
+            fs::remove_file(&previous)?;
+        }
+        fs::rename(path, &previous)?;
+        if let Err(error) = fs::rename(&temporary, path) {
+            let _ = fs::rename(&previous, path);
+            return Err(error.into());
+        }
+        let _ = sync_parent(Some(parent));
+        fs::remove_file(previous)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
 fn sync_parent(parent: Option<&Path>) -> Result<()> {
     #[cfg(unix)]
     {
@@ -3120,6 +3328,96 @@ mod tests {
         let messages = reopened.list_messages(&session.id).expect("list messages");
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "I moved recently and miss my friends.");
+    }
+
+    #[test]
+    fn passphrase_change_rewraps_the_key_without_rewriting_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let old_passphrase = "synthetic old passphrase";
+        let new_passphrase = "synthetic new passphrase";
+        let mut vault = Vault::create(directory.path(), old_passphrase).unwrap();
+        let session = vault.create_session().unwrap();
+        vault
+            .append_user_message(&session.id, "Synthetic durable message.")
+            .unwrap();
+        vault
+            .change_passphrase(
+                &directory.path().join(ENVELOPE_FILE_NAME),
+                old_passphrase,
+                new_passphrase,
+            )
+            .unwrap();
+        drop(vault);
+        assert!(Vault::open(directory.path(), old_passphrase).is_err());
+        let reopened = Vault::open(directory.path(), new_passphrase).unwrap();
+        assert_eq!(reopened.list_messages(&session.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn interrupted_envelope_replacement_recovers_previous_envelope() {
+        let directory = tempfile::tempdir().unwrap();
+        let passphrase = "synthetic recoverable passphrase";
+        let vault = Vault::create(directory.path(), passphrase).unwrap();
+        drop(vault);
+        let envelope = directory.path().join(ENVELOPE_FILE_NAME);
+        let previous = directory
+            .path()
+            .join(format!(".{ENVELOPE_FILE_NAME}.previous"));
+        fs::rename(&envelope, &previous).unwrap();
+        assert!(!envelope.exists());
+        let reopened = Vault::open(directory.path(), passphrase).unwrap();
+        assert!(reopened.list_sessions().unwrap().is_empty());
+        assert!(envelope.exists());
+        assert!(!previous.exists());
+    }
+
+    #[test]
+    fn interrupted_migration_recovers_from_the_encrypted_pre_migration_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let passphrase = "synthetic migration passphrase";
+        let mut vault = Vault::create(directory.path(), passphrase).unwrap();
+        let session = vault.create_session().unwrap();
+        vault
+            .append_user_message(&session.id, "Synthetic migration recovery.")
+            .unwrap();
+        drop(vault);
+        let database = directory.path().join(DATABASE_FILE_NAME);
+        fs::copy(&database, directory.path().join(".vault.db.pre-migration")).unwrap();
+        let mut corrupt = fs::read(&database).unwrap();
+        corrupt[..128].fill(0);
+        fs::write(&database, corrupt).unwrap();
+        let recovered = Vault::open(directory.path(), passphrase).unwrap();
+        assert_eq!(recovered.list_messages(&session.id).unwrap().len(), 1);
+        assert!(!directory.path().join(".vault.db.pre-migration").exists());
+    }
+
+    #[test]
+    fn retention_pruning_uses_the_configured_age_and_cascades_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut vault = Vault::create(directory.path(), "synthetic retention passphrase").unwrap();
+        let expired = vault
+            .create_session_with_title("Expired synthetic conversation")
+            .unwrap();
+        vault
+            .append_user_message(&expired.id, "Synthetic expired source.")
+            .unwrap();
+        let current = vault
+            .create_session_with_title("Current synthetic conversation")
+            .unwrap();
+        vault
+            .connection
+            .execute(
+                "UPDATE sessions SET updated_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
+                [&expired.id],
+            )
+            .unwrap();
+        vault.update_lifecycle_settings(None, Some(30)).unwrap();
+        assert_eq!(vault.prune_retention().unwrap(), 1);
+        assert!(matches!(
+            vault.get_session(&expired.id),
+            Err(VaultError::SessionNotFound)
+        ));
+        assert!(vault.get_session(&current.id).is_ok());
     }
 
     #[test]
