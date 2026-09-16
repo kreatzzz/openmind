@@ -61,6 +61,14 @@ bun run test:core
 cargo check --manifest-path src-tauri/Cargo.toml --locked
 ```
 
+On Windows, prepare each new PowerShell session before the Cargo commands or a native launch:
+
+```powershell
+. ./scripts/windows-env.ps1
+```
+
+This loads the installed Visual Studio C++ environment and selects a native Windows Perl with `IPC::Cmd`. It changes only the current shell. It accepts Strawberry Perl in `C:/Strawberry`, on PATH, or a portable installation under `%LOCALAPPDATA%/Openmind/toolchains/strawberry-perl-*/`. Git for Windows' Unix-oriented Perl is not a substitute: on the September 16 development machine it failed while configuring vendored OpenSSL. Install the repository-pinned Bun version rather than regenerating the lockfile with an older Bun; Bun 1.3.5 cannot read this lockfile format. Neither the environment script nor the verification commands start a development server.
+
 ## Test access
 
 Choose **Open demo** on the welcome or lock screen. No personal account or vault setup is needed.
@@ -127,6 +135,14 @@ The small Ollama fixture establishes protocol operation only. Its responses have
 The remembered-context implementation passes the production frontend build, 17 UI tests, 48 core regression tests, native macOS compilation, formatting, and all-target Clippy with warnings denied. Three opt-in live-provider tests were not run. Regression coverage includes populated schema-v2 migration followed by forgetting, correction persistence, source-history exclusion, stale derivation rejection, linked-note deletion, and UI refresh failures.
 
 A production-build browser check using synthetic data exercised correction, source-scoped forgetting and linked-note removal, light/dark appearance, reduced motion, and desktop/narrow layouts without page errors or horizontal overflow. This does not establish native VoiceOver/NVDA accessibility, Windows behavior, live inference quality, or signed installer readiness. macOS and Windows CI runs on the pull request; native manual accessibility and installer checks remain outstanding.
+
+## Verification recorded September 16, 2026
+
+The monotone UI refinement passes the production frontend build, 23 UI tests, 57 core regression tests, Windows desktop compilation, Rust formatting, and all-target Clippy with warnings denied. Three opt-in live-provider tests were not run. Bun 1.4.2 and Rust 1.98.0 match the repository pins; the local Windows environment has MSVC and WebView2. A portable native Strawberry Perl resolves the vendored OpenSSL configuration failure; use the shell helper above in new terminals. Core test linking reported missing OpenSSL debug-symbol warnings, and parallel SQLCipher tests reported Windows memory-lock quota warnings; the tests passed, but they do not establish that all decrypted pages remain locked in RAM.
+
+Production assets were loaded through Playwright request interception, with no development server started. Browser checks covered the welcome screen, conversation, notes, remembered context, settings, correction, source-scoped forgetting and linked-note removal, search with no results, light/dark themes, reduced motion, 320px/390px layouts, and 200% CSS zoom. No page errors or horizontal overflow were observed. This is browser verification, not native screen-reader, OS zoom, live inference, or installer verification. Required macOS and Windows PR checks remain the merge gate.
+
+The [memory research proposal](memory-research.md) documents future retrieval and organization work. This UI change does not add embeddings, full-text search, new memory categories, or clinical validation.
 
 ## Conversation controls verification
 

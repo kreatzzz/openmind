@@ -33,11 +33,11 @@ export function Transcript({
           <>
             <div className="conversation-title">
               <div className="eyebrow">
-                <span className="margin-line" />
+                <span className="margin-line" aria-hidden="true" />
                 {sample ? "A SAMPLE CONVERSATION" : "YOUR CONVERSATION"}
               </div>
               <h1>{session?.title ?? "A moment to reflect"}</h1>
-              <p>
+              <p className="conversation-date">
                 {sample
                   ? "Monday, September 7"
                   : session
@@ -92,7 +92,7 @@ export function Transcript({
         ) : (
           <div className="empty-conversation">
             <div className="eyebrow">
-              <span className="margin-line" />
+              <span className="margin-line" aria-hidden="true" />
               NEW CONVERSATION
             </div>
             <h1>What's on your mind?</h1>

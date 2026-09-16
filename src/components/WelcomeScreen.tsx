@@ -30,7 +30,7 @@ export function WelcomeScreen({
   onUnlock: (event: FormEvent) => void;
 }) {
   return (
-    <main className="welcome-screen">
+    <main className="welcome-screen" aria-labelledby="welcome-title">
       <header className="welcome-header">
         <div className="rail-brand">
           <Mark />
@@ -41,7 +41,7 @@ export function WelcomeScreen({
       <div className="welcome-body">
         <div className="welcome-copy">
           <div className="eyebrow">YOUR WORKSPACE</div>
-          <h1>Welcome to Openmind</h1>
+          <h1 id="welcome-title">Welcome to Openmind</h1>
           <p>Conversations and notes, together on your device.</p>
         </div>
         <section className="vault-panel">
@@ -56,7 +56,11 @@ export function WelcomeScreen({
               <p>
                 Explore a fictional conversation and get a feel for Openmind.
               </p>
-              <button className="primary-button wide" onClick={onExploreSample}>
+              <button
+                type="button"
+                className="primary-button wide"
+                onClick={onExploreSample}
+              >
                 Open demo <ArrowRight size={17} />
               </button>
               <div className="panel-note">
@@ -145,6 +149,7 @@ export function WelcomeScreen({
                   editable notes.
                 </p>
                 <button
+                  type="button"
                   className="secondary-button wide"
                   onClick={onExploreSample}
                   disabled={busy}

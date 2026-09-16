@@ -8,6 +8,16 @@ const labels = {
   next_step: "Suggested next step",
 };
 
+const formatDate = (value: string) =>
+  new Date(value).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+
+const getErrorMessage = (reason: unknown) =>
+  reason instanceof Error ? reason.message : String(reason);
+
 export function Notebook({
   notes,
   sample,
@@ -37,29 +47,33 @@ export function Notebook({
       setEditing(null);
       setDeleting(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(getErrorMessage(reason));
     } finally {
       setPending(false);
     }
   }
   return (
-    <section className="notebook-scroll">
+    <section className="notebook-scroll" aria-labelledby="notebook-heading">
       <div className="notebook-column">
-        <div className="notebook-heading">
+        <header className="notebook-heading">
           <div>
-            <h1>Your notes</h1>
+            <h1 id="notebook-heading">Your notes</h1>
             <p>
-              Takeaways and questions from your conversations. Yours to edit.
+              Takeaways and questions saved from your conversations. You can
+              revise or remove them at any time.
             </p>
           </div>
-          <span className="preview-badge">
+          <span
+            className="notebook-count"
+            aria-label={`${notes.length} ${notes.length === 1 ? "note" : "notes"}`}
+          >
             {notes.length} {notes.length === 1 ? "note" : "notes"}
           </span>
-        </div>
+        </header>
         {sample && (
           <p className="notebook-disclosure">
-            These fictional notes are editable. Changes last until you close the
-            demo.
+            Browser demo · fictional notes only. Changes reset when you close
+            the demo.
           </p>
         )}
         {error && (
@@ -69,7 +83,7 @@ export function Notebook({
         )}
         {!notes.length && (
           <div className="notes-empty">
-            <BookOpen size={28} />
+            <BookOpen size={28} aria-hidden="true" />
             <h2>No notes yet</h2>
             <p>
               After a completed reply, Openmind can save useful takeaways here
@@ -77,122 +91,141 @@ export function Notebook({
             </p>
           </div>
         )}
-        {notes.map((note) => (
-          <article className="note-card" key={note.id}>
-            <div className="note-meta">
-              <span>{labels[note.kind]}</span>
-              {note.edited && (
-                <span className="preview-badge">Edited by you</span>
-              )}
-              <time dateTime={note.createdAt}>
-                {new Date(note.createdAt).toLocaleDateString(undefined, {
-                  month: "short",
-                  day: "numeric",
-                })}
-              </time>
-            </div>
-            {editing === note.id ? (
-              <form
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void save(note);
-                }}
-              >
-                <label className="sr-only" htmlFor={`note-${note.id}`}>
-                  Edit note
-                </label>
-                <textarea
-                  autoFocus
-                  id={`note-${note.id}`}
-                  className="note-editor"
-                  value={content}
-                  onChange={(event) => setContent(event.target.value)}
-                  disabled={pending}
-                  maxLength={600}
-                />
-                <div className="note-actions">
-                  <button
-                    className="primary-button"
-                    disabled={pending || !content.trim() || disabled}
-                  >
-                    Save note
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={pending}
-                    onClick={() => setEditing(null)}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <p className="note-content">{note.content}</p>
-            )}
-            <blockquote>{note.evidenceQuote}</blockquote>
-            <div className="note-actions">
-              <button
-                className="text-button"
-                disabled={pending || disabled}
-                onClick={() => {
-                  setError("");
-                  void onSource(note).catch((reason: unknown) =>
-                    setError(String(reason)),
-                  );
-                }}
-              >
-                View conversation <ArrowUpRight size={14} />
-              </button>
-              <div className="ml-auto" />
-              {editing !== note.id && (
-                <button
-                  className="icon-button"
-                  aria-label="Edit note"
-                  disabled={pending || disabled}
-                  onClick={() => {
-                    setEditing(note.id);
-                    setContent(note.content);
+        <div className="notes-list">
+          {notes.map((note) => (
+            <article className="note-card" key={note.id}>
+              <header className="note-meta">
+                <span className="note-kind">{labels[note.kind]}</span>
+                {note.edited && <span>Edited by you</span>}
+                <time
+                  className="note-date"
+                  dateTime={note.createdAt}
+                  title={formatDate(note.createdAt)}
+                >
+                  {formatDate(note.createdAt)}
+                </time>
+              </header>
+              {editing === note.id ? (
+                <form
+                  className="note-editor-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void save(note);
                   }}
                 >
-                  <Pencil size={16} />
-                </button>
-              )}
-              <button
-                className="icon-button"
-                aria-label="Delete note"
-                disabled={pending || disabled}
-                onClick={() => setDeleting(note.id)}
-              >
-                <Trash2 size={16} />
-              </button>
-            </div>
-            {deleting === note.id && (
-              <div className="delete-confirm">
-                <p>
-                  Delete this notebook entry? The conversation and its internal
-                  memory will stay.
-                </p>
-                <div className="note-actions">
-                  <button
-                    className="secondary-button danger-button"
+                  <label className="sr-only" htmlFor={`note-${note.id}`}>
+                    Edit note
+                  </label>
+                  <textarea
+                    autoFocus
+                    id={`note-${note.id}`}
+                    className="note-editor"
+                    value={content}
+                    onChange={(event) => setContent(event.target.value)}
                     disabled={pending || disabled}
-                    onClick={() => void save(note, true)}
-                  >
-                    Delete note
-                  </button>
-                  <button
-                    className="text-button"
-                    disabled={pending}
-                    onClick={() => setDeleting(null)}
-                  >
-                    Keep note
-                  </button>
-                </div>
+                    maxLength={600}
+                  />
+                  <div className="note-actions">
+                    <button
+                      className="primary-button"
+                      disabled={pending || !content.trim() || disabled}
+                    >
+                      {pending ? "Saving…" : "Save note"}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={pending}
+                      onClick={() => setEditing(null)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <p className="note-content">{note.content}</p>
+              )}
+
+              <div className="note-evidence">
+                <p className="note-evidence-label">Source evidence</p>
+                <blockquote>{note.evidenceQuote}</blockquote>
               </div>
-            )}
-          </article>
-        ))}
+
+              <footer className="note-actions note-card-actions">
+                <button
+                  type="button"
+                  className="text-button"
+                  disabled={pending || disabled}
+                  onClick={() => {
+                    setError("");
+                    void onSource(note).catch((reason: unknown) =>
+                      setError(getErrorMessage(reason)),
+                    );
+                  }}
+                >
+                  View conversation
+                  <ArrowUpRight size={14} aria-hidden="true" />
+                </button>
+                <div className="ml-auto" />
+                {editing !== note.id && (
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label="Edit note"
+                    disabled={pending || disabled}
+                    onClick={() => {
+                      setError("");
+                      setDeleting(null);
+                      setEditing(note.id);
+                      setContent(note.content);
+                    }}
+                  >
+                    <Pencil size={16} aria-hidden="true" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label="Delete note"
+                  disabled={pending || disabled}
+                  onClick={() => {
+                    setError("");
+                    setEditing(null);
+                    setDeleting(note.id);
+                  }}
+                >
+                  <Trash2 size={16} aria-hidden="true" />
+                </button>
+              </footer>
+              {deleting === note.id && (
+                <div className="delete-confirm">
+                  <p>
+                    Delete this notebook entry? The conversation and its
+                    remembered context will stay.
+                  </p>
+                  <div className="note-actions">
+                    <button
+                      type="button"
+                      className="secondary-button danger-button"
+                      disabled={pending || disabled}
+                      onClick={() => void save(note, true)}
+                    >
+                      {pending ? "Deleting…" : "Delete note"}
+                    </button>
+                    <button
+                      type="button"
+                      className="text-button"
+                      disabled={pending}
+                      onClick={() => setDeleting(null)}
+                    >
+                      Keep note
+                    </button>
+                  </div>
+                </div>
+              )}
+            </article>
+          ))}
+        </div>
       </div>
     </section>
   );

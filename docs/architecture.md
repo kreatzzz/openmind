@@ -123,6 +123,8 @@ Run at most one large-model generation at a time on the initial local configurat
 
 ## Context construction
 
+The [local memory research proposal](memory-research.md) defines the next retrieval boundary, overlapping memory views, hybrid search, and evaluation sequence. It recommends incremental changes to the existing SQLCipher vault. This is proposed work; current retrieval is correction/recency ordered and byte bounded.
+
 Order context as fixed behavioral policy, explicit user preferences, current session summary, retrieved memories with evidence labels, recent turns, and current user input. Mark quoted material and retrieved text as untrusted content. Never interpolate retrieved text into system policy or tool definitions.
 
 For a validated 8,192-token model configuration, an initial test budget is 1,500 tokens of policy, 1,200 of memory, 3,500 of recent conversation including the current message, 1,200 reserved for output, and 792 for format overhead. These are tunable targets. Verify actual token accounting per adapter; conservative estimates need extra headroom.

@@ -2,6 +2,8 @@
 
 Status: full-product proposal. The [engineering preview](prototype.md#remembered-context-controls) implements source-backed records, corrections, and source-message-scoped forgetting; relationships, semantic retrieval, and topic-wide forgetting remain proposed. The graph provides continuity across conversations. It is not a psychological diagnosis, a simulation of a human mind, or a store of model chain-of-thought.
 
+The September 16 [research and implementation proposal](memory-research.md) refines this design with seven overlapping views, query-aware keyword/vector retrieval, source eligibility, and a staged delivery plan. These remain recommendations. Existing code still uses five memory kinds and correction/recency ordering; the UI refinement does not implement semantic search.
+
 ## What the graph represents
 
 Store people, life events, recurring topics, goals, preferences, and coping approaches as nodes with typed relationships. Keep exact facts and tentative interpretations separate. For example, a synthetic user saying "I moved in March and have barely seen my friends since" supports a move event and a report of reduced contact. It does not establish that the move caused depression.
@@ -73,7 +75,7 @@ No speculative overnight "analysis" pass. Consolidation may shorten redundant su
 
 ## Retrieval
 
-Start with SQL full-text search over short memory statements and indexed people/topics. Search only the active profile. Retrieve a bounded seed set, then expand at most two graph hops with a hard node cap. Start testing with 20 seeds and 40 total candidates.
+Start with SQL full-text search over short memory statements and indexed people/topics. Search only the active profile and eligible sources. The [September 16 refinement](memory-research.md#retrieval-and-context-assembly) starts with one-hop expansion and a 40-candidate cap; a second hop needs measured benefit. It also specifies independent lexical/vector candidate channels, time-aware correction handling, and cross-category recall.
 
 Rank by query relevance, evidence quality, recency where relevant, and user-designated importance. Stable preferences should not expire merely because they were mentioned long ago. User-confirmed corrections outrank older conflicting statements. Include ambiguity when it matters.
 

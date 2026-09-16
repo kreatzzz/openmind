@@ -1,6 +1,6 @@
 # Decisions and questions
 
-Planning began September 6, 2026; requirements updated September 8, 2026. A desktop engineering preview now exercises the shell, encrypted vault, and Ollama streaming. See [prototype status](prototype.md) for the implemented subset and its limitations.
+Planning began September 6, 2026; requirements updated September 16, 2026. A desktop engineering preview now exercises the shell, encrypted vault, and Ollama streaming. See [prototype status](prototype.md) for the implemented subset and its limitations.
 
 ## Confirmed requirements
 
@@ -12,6 +12,7 @@ Planning began September 6, 2026; requirements updated September 8, 2026. A desk
 - Encrypted internal notes, with the intended degree of user access still to resolve.
 - Planned sessions and conversations started at any time.
 - A polished interface based on Vercel's Geist design system, confirmed September 8.
+- A minimal, monotone UI refinement and a researched memory architecture proposal, requested September 16. Memory categories and retrieval implementation remain recommendations pending development; the current pass implements UI refinement only.
 - One-click demo access with public test credentials and an isolated synthetic-data vault.
 - A bridge to the developer's OpenAI subscription for testing, requested September 8. The implementation uses the existing ChatGPT sign-in through Codex, subject to verification.
 - Clinical therapy is the intended product scope. Specific indications and clinical delivery model remain open.
@@ -30,6 +31,8 @@ The subscription testing adapter is limited to the native demo workspace with ex
 | Other providers | Separate OpenAI-compatible adapter | Broad interoperability without assuming every server implements the same features |
 | Storage | One SQLCipher database per local profile | Transactions across chat, graph, search, and deletion without a graph service |
 | Internal memory | Hide raw graph in normal UI; expose useful remembered facts and controls | User can correct or delete information without navigating internal inference records |
+| Memory organization | Seven overlapping views over source-backed records; sensitivity independent of category | [Research proposal](memory-research.md) distinguishes psychological frameworks from our product taxonomy; no mandatory trauma folder |
+| Memory retrieval | Encrypted FTS5 baseline, then local vector search and rank fusion in the same vault | Adds relevance to current correction/recency ordering while preserving permissions, correction, and forgetting; extensions require benchmarks |
 | Identity | One local profile; no account or authentication service | Offline use and no account backend; additional profiles can come later |
 | Input | Typing plus local speech-to-text, pending clarification | Interpret "switch to text" as speech-to-text; transcriptions become editable drafts before submission |
 | Turn execution | Stream a reply, then run one structured call for both note sets | Two main model calls, bounded work, no wait for note generation before replying |

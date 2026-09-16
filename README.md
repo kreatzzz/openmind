@@ -23,6 +23,7 @@ Run `bun run tauri dev` and choose **Open demo**. The public test login is `demo
 | [Architecture](docs/architecture.md) | Desktop stack, component boundaries, provider integration, session flow, and planned code layout |
 | [Turn processing](docs/turn-processing.md) | Two model calls for three results, text streaming, note updates, recovery, and speech input |
 | [Memory](docs/memory.md) | Graph schema, evidence, retrieval, corrections, and forgetting |
+| [Memory research and next steps](docs/memory-research.md) | Psychology-informed categories, local hybrid retrieval, evaluation, and an incremental implementation proposal |
 | [Privacy](docs/privacy.md) | Encryption, key management, trust boundaries, backups, and limits of hidden memory |
 | [Conversation policy](docs/conversation-policy.md) | Proposed behavior, crisis handling, and evaluation requirements |
 | [Design](DESIGN.md) | Visual identity, design tokens, screens, interaction, and accessibility |
