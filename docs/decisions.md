@@ -12,14 +12,14 @@ Planning began September 6, 2026; requirements updated September 16, 2026. A des
 - Encrypted internal notes, with the intended degree of user access still to resolve.
 - Planned sessions and conversations started at any time.
 - A polished interface based on Vercel's Geist design system, confirmed September 8.
-- A minimal, monotone UI refinement and a researched memory architecture proposal, requested September 16. Memory categories and retrieval implementation remain recommendations pending development; the current pass implements UI refinement only.
-- One-click demo access with public test credentials and an isolated synthetic-data vault.
+- A minimal, monotone UI refinement and a researched memory architecture proposal, requested September 16. The subsequent September 16 request authorized implementation of provider setup, hybrid retrieval, vault lifecycle controls, and planned sessions. Clinical validation remains separate.
+- An isolated example workspace with public fixture credentials. The September 16 interface request removes repeated demo/preview labeling, adds guided setup and accent themes, and makes dark surfaces pure black.
 - A bridge to the developer's OpenAI subscription for testing, requested September 8. The implementation uses the existing ChatGPT sign-in through Codex, subject to verification.
 - Clinical therapy is the intended product scope. Specific indications and clinical delivery model remain open.
 - Streamed text responses from the model at launch; text-to-speech output comes later, with ElevenLabs as an example provider.
 - Three results from submitted input: updated encrypted internal notes, a response, and updated notes for the user. Execution order and optimization are delegated to architecture design.
 
-The subscription testing adapter is limited to the native demo workspace with explicit remote-data consent. General remote-provider support for personal vaults remains separate work. See [Codex testing](codex-testing.md).
+The subscription testing adapter is limited to the native demo workspace with explicit remote-data consent. Personal vaults use the separate OpenAI-compatible adapter with explicit remote-data consent. See [Codex testing](codex-testing.md).
 
 ## Proposed decisions
 

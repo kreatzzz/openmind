@@ -33,7 +33,7 @@ Recent raw turns cover ordinary lag. If pending history exceeds the context budg
 
 The two write branches are independently enabled per conversation. Snapshot their permissions when input and its notes job are committed. Disabling a branch revokes its pending or failed jobs without deleting completed records; enabling it again only grants permission to newly submitted messages. Recheck the durable job permissions when claiming and applying a patch. Skip the structured request when both branches are disallowed, and show a skipped state rather than claiming notes were updated.
 
-The conversation's remembered-context preference also gates retrieval of saved memory for the response call. Its own transcript remains persisted and is still used as recent conversation context. This differs from the proposed private-session mode, which remains unimplemented.
+The conversation's remembered-context preference also gates retrieval of saved memory for the response call. Its own transcript remains persisted and is still used as recent conversation context. Private sessions instead keep their transcript in process memory, skip saved-memory retrieval and both derivation branches, and disappear when the vault locks or the renderer reconnects.
 
 ## What goes into user notes
 

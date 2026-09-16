@@ -5,7 +5,7 @@ This development adapter connects the native demo workspace to a locally install
 ## Test access
 
 1. Install the official Codex CLI and run `codex login` with the ChatGPT subscription you want to test. `codex login status` should report ChatGPT access.
-2. Open the desktop app and choose **Open demo**. The button supplies the public fixture credentials, `demo` / `openmind-demo-2026`.
+2. Open the desktop app and choose **Explore the workspace**. The button supplies the public fixture credentials, `demo` / `openmind-demo-2026`.
 3. In Settings, choose **ChatGPT via Codex** and check the connection. Select an available model.
 4. Read and enable the consent checkbox, then send a fictional message. A completed reply is followed by the separate structured notes request.
 
@@ -15,7 +15,7 @@ The app uses the existing Codex login. It does not create a separate Openmind ac
 
 The bridge runs locally, but model inference runs on OpenAI's servers. Reply requests send the bounded demo conversation and saved context. The notes request sends the current user message as source material. Subscription limits and the account's applicable data policies still apply.
 
-The UI starts with consent unchecked. Rust checks demo mode and consent before reading content or creating a remote turn or notes job. Switching providers or locking clears the UI consent. Personal vaults and the browser sample cannot use this development adapter.
+The UI starts with consent unchecked. Rust checks demo mode and consent before reading content or creating a remote turn or notes job. Provider configuration and consent are persisted in the encrypted example vault. Changing the provider or destination requires consent to be reviewed again; changing an endpoint, model, credential, or consent revokes queued remote notes snapshots. Locking prevents further requests until unlock. Personal vaults and the browser sample cannot use this development adapter.
 
 Openmind continues to save its transcript and notes in the encrypted demo vault. The public demo passphrase is unsuitable for personal information. Use fictional test material only.
 
@@ -26,6 +26,8 @@ The UI, native consent checks, and first child-process adapter are checked in. A
 The adapter requests ephemeral threads, uses temporary working/log/state paths, disables tool features, explicitly disables inherited MCP servers, and checks their runtime status before sending source text. Unit tests cover MCP-state rejection, final-message filtering, unexpected tool items, and cancellation before startup. Those tests do not establish isolation across every Codex version.
 
 **Live subscription generation and native end-to-end verification remain pending.** This is today's checkpoint, not a completed remote-provider milestone. The local Ollama workflow remains the verified testing path.
+
+The adapter checks the executable version and `app-server --help --stdio` before use. `OPENMIND_CODEX_PATH` can select an absolute executable path. On Windows, discovery checks the official stable location and a bounded set of versioned subdirectories before PATH. The installed Codex `0.154.0-alpha.6.2` passed these probes on September 16; that does not establish live reply or notes operation.
 
 ## Next session
 
