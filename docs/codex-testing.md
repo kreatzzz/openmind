@@ -5,7 +5,7 @@ This development adapter connects the native demo workspace to a locally install
 ## Test access
 
 1. Install the official Codex CLI and run `codex login` with the ChatGPT subscription you want to test. `codex login status` should report ChatGPT access.
-2. Open the desktop app and choose **Explore the workspace**. The button supplies the public fixture credentials, `demo` / `openmind-demo-2026`.
+2. Open the desktop app and choose **Explore with example conversations**. The button supplies the public fixture credentials, `demo` / `openmind-demo-2026`.
 3. In Settings, choose **ChatGPT via Codex** and check the connection. Select an available model.
 4. Read and enable the consent checkbox, then send a fictional message. A completed reply is followed by the separate structured notes request.
 

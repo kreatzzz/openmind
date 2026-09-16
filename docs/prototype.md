@@ -79,7 +79,7 @@ This loads the installed Visual Studio C++ environment and selects a native Wind
 
 ## Test access
 
-Choose **Open demo** on the welcome or lock screen. No personal account or vault setup is needed.
+Choose **Explore with example conversations** on the welcome or lock screen. No personal account or vault setup is needed.
 
 | Field | Value |
 | --- | --- |
