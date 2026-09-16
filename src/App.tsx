@@ -995,7 +995,7 @@ export default function App() {
         onClick={sample ? exitSample : newSession}
         disabled={sending || busy}
       >
-        <Plus size={18} />
+        {sample ? <ArrowRight size={17} /> : <Plus size={18} />}
         {sample ? "Close demo" : "New conversation"}
       </button>
       <div className="session-search">
@@ -1118,7 +1118,9 @@ export default function App() {
       </div>
       {screen === "conversation" ? (
         <>
-          <aside className="desktop-rail">{rail}</aside>
+          <aside className="desktop-rail" aria-label="Workspace navigation">
+            {rail}
+          </aside>
           <main className="workspace">
             <header className="workspace-header">
               <div className="header-start">
@@ -1136,7 +1138,9 @@ export default function App() {
                       ? "Your notes"
                       : "Conversation"}
                 </span>
-                <span className="header-slash">/</span>
+                <span className="header-slash" aria-hidden="true">
+                  /
+                </span>
                 <span className="header-date">
                   {memoryView
                     ? `${memories.length} ${memories.length === 1 ? "item" : "items"}`
@@ -1173,7 +1177,7 @@ export default function App() {
               </div>
             </header>
             {isDemo && (
-              <div className="sample-banner">
+              <div className="sample-banner" role="note">
                 <span>Demo workspace · Synthetic data only</span>
                 <button onClick={sample ? exitSample : lock}>
                   Close demo <ArrowRight size={14} />

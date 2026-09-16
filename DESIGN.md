@@ -12,7 +12,7 @@ colors:
   selected: "#EBEBEB"
   primary: "#171717"
   on-primary: "#FFFFFF"
-  focus: "#0070F3"
+  focus: "#525252"
   error: "#CC0000"
   night-background: "#0A0A0A"
   night-surface: "#111111"
@@ -20,7 +20,7 @@ colors:
   night-muted: "#A1A1A1"
   night-line: "#292929"
   night-input-border: "#666666"
-  night-focus: "#52A8FF"
+  night-focus: "#D4D4D4"
 typography:
   title:
     fontFamily: "Geist Variable, Geist, system-ui, sans-serif"
@@ -83,9 +83,9 @@ Krish selected Vercel's Geist design system for this interface. Openmind keeps i
 
 ## Implemented desktop preview
 
-The shell has a 248px navigation rail, a 64px header, and a reading column around 680px wide. The rail contains conversation search and history, Your notes, Remembered context, Settings, and Lock vault. Below 960px navigation moves into an accessible dialog. Content uses one column on narrow screens without hiding essential actions.
+The shell has a 248px navigation rail, a 64px header, and a reading column around 680px wide. The rail is a quiet utility surface: the dark New conversation action establishes the primary path, while selected rows use a neutral fill and the remaining navigation stays low contrast. Below 960px navigation moves into an accessible dialog. Content uses one column on narrow screens without hiding essential actions.
 
-The welcome screen is a compact workspace entry, with vault creation or unlock and a visible Open demo action. Demo opens fictional conversations and notes without creating a personal account. The native demo uses a separate demo vault. Its known credentials are unsuitable for personal information. Keep the synthetic-only banner visible in every demo view. The browser demo permits temporary edits to fictional notes and clearly states that it has no inference or storage.
+The welcome screen is a restrained two-column entry on wide screens, pairing the product introduction with a single vault panel; it collapses to one column on narrow screens. Vault creation or unlock remains primary and Open demo stays visible. Demo opens fictional conversations and notes without creating a personal account. The native demo uses a separate demo vault. Its known credentials are unsuitable for personal information. Keep the synthetic-only banner visible in every demo view. The browser demo permits temporary edits to fictional notes and clearly states that it has no inference or storage.
 
 The conversation header offers Conversation controls and deletion with confirmation. Conversation controls let the user rename the conversation and independently choose whether to use/save remembered context and save notebook updates. Off states remain visible beside the conversation. Explain that the transcript stays saved, existing memories and notes are retained, and settings apply to this conversation. Disabling a branch also stops its outstanding updates; enabling it again does not process messages submitted while it was off. Keep controls unavailable during an active reply or notes update, with a clear stop-first explanation. Deleting a conversation removes its transcript and derived notes and internal memory from the active vault. Do not promise backup erasure.
 
@@ -103,7 +103,7 @@ Correct and Forget are explicit actions with revision checks. Explain the affect
 
 ## Color and components
 
-Use background for content and surface for the rail and subtle component separation. Neutral shades cover resting, hover, active, border, and text roles. Blue is reserved for focus and the demo disclosure. Errors include readable text. Color alone must not convey status.
+Use background for content and surface for the rail and subtle component separation. Neutral shades cover resting, hover, active, border, focus, text, and demo-disclosure roles. Errors include readable text. Color alone must not convey status. Conversation turns, notes, and remembered context use whitespace and dividers instead of stacked cards; elevation is limited to floating or contained controls such as the composer, dialogs, and vault panel.
 
 Inputs have a stronger border than structural dividers. Preserve visible keyboard focus and readable contrast in both themes. Buttons and inputs use a shared 6px radius and a minimum 40px desktop height. Touch layouts increase action height to 44px. The composer has 8px padding around a 6px send button, giving it a 14px outer radius. Dialogs use 12px corners with a small layered shadow. Avoid decorative gradients, glass, oversized welcome headlines, and stacks of unnecessary cards.
 
