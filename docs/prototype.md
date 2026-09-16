@@ -157,3 +157,7 @@ The [memory research proposal](memory-research.md) informed the subsequent [dail
 The conversation-controls increment passes 23 UI tests and 57 core regression tests, the production frontend build, native macOS compilation, formatting, and all-target Clippy with warnings denied. Three opt-in live-provider tests were not run. Tests cover independent output branches, skipping both-disabled jobs, messages submitted while saving was disabled, revocation across restart/re-enable/retry, active-work restrictions, revision conflicts, title limits, and schema-v3 migration preserving forgotten-source exclusions. Earlier schema migrations remain covered.
 
 Production-build browser checks with fictional data cover title changes, independent switches, visible off states, retained memory records, light/dark dialogs, reduced motion, and narrow layouts without page errors or horizontal overflow. Native screen-reader and Windows manual testing remain outstanding; both platform CI jobs run on the new pull request. The preceding remembered-context PR passed macOS and Windows CI before merging.
+
+## Daily-use integration verification
+
+The September 16 daily-use increment passes 103 Rust regression tests, 26 UI tests, and the production frontend build on Windows. Two opt-in local Ollama tests also passed using the installed `qwen3.5:4b` with synthetic text. No model download or remote inference was performed. See [implementation boundaries and remaining release work](daily-use-foundation.md).
