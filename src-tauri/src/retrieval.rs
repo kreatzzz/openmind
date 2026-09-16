@@ -79,6 +79,46 @@ pub struct MemoryIndexStatus {
     pub stale_embeddings: usize,
     pub embedding_models: Vec<String>,
     pub last_rebuilt_at: Option<String>,
+    pub active_embedding: Option<EmbeddingConfiguration>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingConfiguration {
+    pub base_url: String,
+    pub model: String,
+    pub activated_at: String,
+}
+
+/// Prompt packing remains byte-enforced because Openmind does not currently
+/// ship each model's tokenizer. The token target is planning metadata, not a
+/// claim that UTF-8 bytes map to tokens at a fixed ratio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextBudget {
+    pub max_utf8_bytes: usize,
+    pub target_tokens: usize,
+    pub max_records: usize,
+}
+
+impl ContextBudget {
+    pub fn conservative_fallback(target_tokens: usize, max_records: usize) -> Self {
+        // Three bytes per target token is a measured planning fallback for
+        // short English memory units. The independent 4,096-byte ceiling and
+        // caller's full-prompt byte guard are the enforced bounds.
+        Self {
+            max_utf8_bytes: target_tokens.saturating_mul(3).min(4_096),
+            target_tokens,
+            max_records,
+        }
+    }
+
+    pub fn retrieval_options(self, query_embedding: Option<QueryEmbedding>) -> RetrievalOptions {
+        RetrievalOptions {
+            max_bytes: self.max_utf8_bytes,
+            max_records: self.max_records,
+            query_embedding,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -445,6 +485,17 @@ mod tests {
         assert_eq!(decode_vector(&bytes, 3), Some(vector));
         assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]), Some(1.0));
         assert!(cosine_similarity(&[1.0], &[1.0, 2.0]).is_none());
+    }
+
+    #[test]
+    fn context_budget_exposes_estimate_but_enforces_a_byte_ceiling() {
+        let budget = ContextBudget::conservative_fallback(1_200, 8);
+        assert_eq!(budget.target_tokens, 1_200);
+        assert_eq!(budget.max_utf8_bytes, 3_600);
+        assert_eq!(
+            ContextBudget::conservative_fallback(2_000, 8).max_utf8_bytes,
+            4_096
+        );
     }
 
     #[test]

@@ -16,7 +16,8 @@ use crate::{
     notes::{MemoryRecord, NotePatch, NotesInput, UserNote},
     retrieval::{
         embed_local_ollama, embed_local_ollama_after_verification, verify_local_ollama_model,
-        MemoryIndexStatus, RetrievalOptions, RetrievalResult,
+        ContextBudget, EmbeddingConfiguration, MemoryIndexStatus, RetrievalOptions,
+        RetrievalResult,
     },
     vault::Vault,
 };
@@ -141,6 +142,7 @@ struct State {
     active: Option<ActiveTurn>,
     notes_active: Option<ActiveNotes>,
     is_demo: bool,
+    vault_epoch: u64,
     private_sessions: HashMap<String, PrivateSession>,
     last_activity: Instant,
 }
@@ -154,6 +156,7 @@ impl Default for State {
             is_demo: false,
             private_sessions: HashMap::new(),
             last_activity: Instant::now(),
+            vault_epoch: 0,
         }
     }
 }
@@ -299,6 +302,7 @@ impl Engine {
         seed_demo(&mut vault).map_err(|error| error.to_string())?;
         state.vault = Some(vault);
         state.is_demo = true;
+        state.vault_epoch = state.vault_epoch.wrapping_add(1);
         Ok(VaultStatus {
             exists: true,
             unlocked: true,
@@ -320,6 +324,7 @@ impl Engine {
         state.vault = Some(vault);
         state.is_demo = false;
         state.last_activity = Instant::now();
+        state.vault_epoch = state.vault_epoch.wrapping_add(1);
         Ok(())
     }
 
@@ -340,6 +345,7 @@ impl Engine {
         }
         state.is_demo = false;
         state.private_sessions.clear();
+        state.vault_epoch = state.vault_epoch.wrapping_add(1);
         // Release the vault even if the final status could not be persisted.
         // Opening it again recovers unfinished messages as interrupted.
         state.vault.take();
@@ -834,28 +840,75 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
-    /// Opt-in hybrid retrieval. The query is sent only to the caller-selected
-    /// loopback Ollama endpoint; lexical retrieval remains available without it.
-    pub async fn retrieve_memory_context_with_local_embedding(
+    pub fn memory_embedding_configuration(&self) -> Result<Option<EmbeddingConfiguration>, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .memory_embedding_configuration()
+            .map_err(|error| error.to_string())
+    }
+
+    /// Retrieve for one durable session. Permission and vault identity are
+    /// checked before any local model call and again before context dispatch.
+    pub async fn retrieve_configured_memory_context(
         &self,
-        base_url: &str,
-        model: &str,
+        session_id: &str,
         query: &str,
-        max_bytes: usize,
-        max_records: usize,
+        budget: ContextBudget,
         cancel: &CancellationToken,
     ) -> Result<RetrievalResult, String> {
-        let embedding = embed_local_ollama(base_url, model, query, cancel)
-            .await
+        let snapshot = {
+            let state = self.state()?;
+            let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
+            let session = vault
+                .get_session(session_id)
+                .map_err(|error| error.to_string())?;
+            if !session.memory_enabled {
+                return Ok(RetrievalResult::default());
+            }
+            (
+                state.vault_epoch,
+                session.revision,
+                vault.retrieval_epoch().map_err(|error| error.to_string())?,
+                vault
+                    .memory_embedding_configuration()
+                    .map_err(|error| error.to_string())?,
+            )
+        };
+        let Some(configuration) = snapshot.3.as_ref() else {
+            return self.retrieve_memory_context(query, &budget.retrieval_options(None));
+        };
+        let embedding =
+            embed_local_ollama(&configuration.base_url, &configuration.model, query, cancel)
+                .await
+                .map_err(|error| error.to_string())?;
+        let state = self.state()?;
+        if state.vault_epoch != snapshot.0 {
+            return Err("The vault changed while retrieving remembered context.".into());
+        }
+        let vault = state
+            .vault
+            .as_ref()
+            .ok_or("The vault was locked while retrieving remembered context.")?;
+        let session = vault
+            .get_session(session_id)
             .map_err(|error| error.to_string())?;
-        self.retrieve_memory_context(
-            query,
-            &RetrievalOptions {
-                max_bytes,
-                max_records,
-                query_embedding: Some(embedding),
-            },
-        )
+        if !session.memory_enabled || session.revision != snapshot.1 {
+            return Err("Memory permission changed while retrieving remembered context.".into());
+        }
+        if vault.retrieval_epoch().map_err(|error| error.to_string())? != snapshot.2
+            || vault
+                .memory_embedding_configuration()
+                .map_err(|error| error.to_string())?
+                .as_ref()
+                != Some(configuration)
+        {
+            return Err("Remembered context changed while retrieval was running.".into());
+        }
+        vault
+            .retrieve_memory_context(query, &budget.retrieval_options(Some(embedding)))
+            .map_err(|error| error.to_string())
     }
 
     /// Build a bounded batch of record embeddings. Calls never select or
@@ -867,20 +920,26 @@ impl Engine {
         cancel: &CancellationToken,
     ) -> Result<MemoryIndexStatus, String> {
         const MAX_BATCH: usize = 256;
+        let initial_vault_epoch = self.state()?.vault_epoch;
+        self.rebuild_memory_index()?;
         verify_local_ollama_model(base_url, model)
             .await
             .map_err(|error| error.to_string())?;
-        let sources = {
+        let (vault_epoch, sources) = {
             let state = self.state()?;
+            if state.vault_epoch != initial_vault_epoch {
+                return Err("The vault changed during memory search rebuild.".into());
+            }
             if state.active.is_some() || state.notes_active.is_some() {
                 return Err("Stop the current operation before rebuilding memory search.".into());
             }
-            state
+            let sources = state
                 .vault
                 .as_ref()
                 .ok_or("Unlock your vault first.")?
                 .pending_embedding_sources(model, MAX_BATCH)
-                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            (state.vault_epoch, sources)
         };
         for source in sources {
             let embedding =
@@ -888,6 +947,9 @@ impl Engine {
                     .await
                     .map_err(|error| error.to_string())?;
             let mut state = self.state()?;
+            if state.vault_epoch != vault_epoch {
+                return Err("The vault changed during memory search rebuild.".into());
+            }
             if state.active.is_some() || state.notes_active.is_some() {
                 return Err("Memory search rebuild was interrupted by active work.".into());
             }
@@ -898,7 +960,91 @@ impl Engine {
                 .store_memory_embedding(&source.memory_id, source.revision, &embedding)
                 .map_err(|error| error.to_string())?;
         }
+        let pending = {
+            let state = self.state()?;
+            state
+                .vault
+                .as_ref()
+                .ok_or("Unlock your vault first.")?
+                .pending_embedding_sources(model, 1)
+                .map_err(|error| error.to_string())?
+        };
+        if pending.is_empty() {
+            let mut state = self.state()?;
+            if state.vault_epoch != vault_epoch {
+                return Err("The vault changed during memory search rebuild.".into());
+            }
+            state
+                .vault
+                .as_mut()
+                .ok_or("Unlock your vault first.")?
+                .activate_memory_embedding_configuration(base_url, model)
+                .map_err(|error| error.to_string())?;
+        }
         self.memory_index_status()
+    }
+
+    /// Maintain a small batch after corrections or newly accepted memories.
+    /// Failure leaves lexical retrieval available and the status degraded.
+    pub async fn update_configured_memory_embeddings(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<MemoryIndexStatus, String> {
+        const MAX_BATCH: usize = 32;
+        let (vault_epoch, configuration, sources) = {
+            let state = self.state()?;
+            let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
+            let Some(configuration) = vault
+                .memory_embedding_configuration()
+                .map_err(|error| error.to_string())?
+            else {
+                return vault
+                    .memory_index_status()
+                    .map_err(|error| error.to_string());
+            };
+            let sources = vault
+                .pending_embedding_sources(&configuration.model, MAX_BATCH)
+                .map_err(|error| error.to_string())?;
+            (state.vault_epoch, configuration, sources)
+        };
+        verify_local_ollama_model(&configuration.base_url, &configuration.model)
+            .await
+            .map_err(|error| error.to_string())?;
+        for source in sources {
+            let embedding = embed_local_ollama_after_verification(
+                &configuration.base_url,
+                &configuration.model,
+                &source.content,
+                cancel,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let mut state = self.state()?;
+            if state.vault_epoch != vault_epoch {
+                return Err("The vault changed during memory search update.".into());
+            }
+            state
+                .vault
+                .as_mut()
+                .ok_or("The vault was locked during memory search update.")?
+                .store_memory_embedding(&source.memory_id, source.revision, &embedding)
+                .map_err(|error| error.to_string())?;
+        }
+        self.memory_index_status()
+    }
+
+    pub fn clear_memory_embedding_configuration(&self) -> Result<MemoryIndexStatus, String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop the current operation before changing memory search.".into());
+        }
+        let vault = state.vault.as_mut().ok_or("Unlock your vault first.")?;
+        vault
+            .clear_memory_embedding_configuration()
+            .map_err(|error| error.to_string())?;
+        vault
+            .memory_index_status()
+            .map_err(|error| error.to_string())
     }
 
     pub fn notes_permissions(&self, message_id: &str) -> Result<(bool, bool), String> {
@@ -1487,6 +1633,28 @@ mod tests {
             .finish_turn_and_prepare_notes(&turn.assistant.id, MessageStatus::Complete)
             .expect("finish turn")
             .expect("finished turn")
+    }
+
+    #[tokio::test]
+    async fn disabled_session_never_calls_embedding_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let session = engine
+            .update_session(&session.id, &session.title, false, true, session.revision)
+            .unwrap();
+        let result = engine
+            .retrieve_configured_memory_context(
+                &session.id,
+                "synthetic query",
+                ContextBudget::conservative_fallback(1_200, 8),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("disabled retrieval");
+        assert!(result.context.is_empty());
+        assert!(result.matches.is_empty());
     }
 
     #[test]

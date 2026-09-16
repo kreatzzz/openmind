@@ -23,9 +23,10 @@ use crate::{
     engine::ProviderKind,
 };
 use crate::retrieval::{
-    cosine_similarity, decode_vector, encode_vector, fts_query, fuse_rankings, EmbeddingSource,
-    MemoryIndexState, MemoryIndexStatus, MemoryView, QueryEmbedding, RetrievalOptions,
-    RetrievalResult, RetrievedMemory, MAX_RETRIEVAL_CANDIDATES, MIN_SEMANTIC_SIMILARITY,
+    cosine_similarity, decode_vector, encode_vector, fts_query, fuse_rankings,
+    EmbeddingConfiguration, EmbeddingSource, MemoryIndexState, MemoryIndexStatus, MemoryView,
+    QueryEmbedding, RetrievalOptions, RetrievalResult, RetrievedMemory, MAX_RETRIEVAL_CANDIDATES,
+    MIN_SEMANTIC_SIMILARITY,
 };
 
 pub const DATABASE_FILE_NAME: &str = "vault.db";
@@ -827,6 +828,7 @@ impl Vault {
         let transaction = self.connection.transaction()?;
         ensure_session(&transaction, &session_id)?;
         delete_retrieval_for_session(&transaction, &session_id)?;
+        bump_retrieval_epoch(&transaction)?;
         transaction.execute("DELETE FROM sessions WHERE id = ?1", [&session_id])?;
         transaction.commit()?;
         Ok(())
@@ -965,6 +967,7 @@ impl Vault {
             "DELETE FROM memory_embeddings WHERE memory_id = ?1",
             [&memory_id],
         )?;
+        bump_retrieval_epoch(&transaction)?;
         let updated = memory_with_deleted_from_id(&transaction, &memory_id)?;
         transaction.commit()?;
         Ok(updated.memory)
@@ -1036,6 +1039,7 @@ impl Vault {
              WHERE source_message_id = ?2 AND deleted = 0",
             params![timestamp, source_message_id],
         )?;
+        bump_retrieval_epoch(&transaction)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1389,6 +1393,9 @@ impl Vault {
                     &candidate.evidence_quote,
                     &user.created_at,
                 )?;
+            }
+            if !patch.memories.is_empty() {
+                bump_retrieval_epoch(&transaction)?;
             }
         }
         if notes_enabled {
@@ -1759,8 +1766,14 @@ impl Vault {
             [],
             |row| row.get(0),
         )?;
+        let active_embedding = self.memory_embedding_configuration()?;
         Ok(MemoryIndexStatus {
-            state: if eligible_records == lexical_indexed && stale_embeddings == 0 {
+            state: if eligible_records == lexical_indexed
+                && stale_embeddings == 0
+                && active_embedding
+                    .as_ref()
+                    .is_none_or(|_| semantic_indexed == eligible_records)
+            {
                 MemoryIndexState::Ready
             } else {
                 MemoryIndexState::Degraded
@@ -1771,7 +1784,110 @@ impl Vault {
             stale_embeddings: usize::try_from(stale_embeddings).unwrap_or(usize::MAX),
             embedding_models,
             last_rebuilt_at,
+            active_embedding,
         })
+    }
+
+    pub fn memory_embedding_configuration(&self) -> Result<Option<EmbeddingConfiguration>> {
+        self.connection
+            .query_row(
+                "SELECT base_url, model, activated_at
+                 FROM memory_index_settings WHERE singleton = 1",
+                [],
+                |row| {
+                    let base_url: Option<String> = row.get(0)?;
+                    let model: Option<String> = row.get(1)?;
+                    let activated_at: Option<String> = row.get(2)?;
+                    match (base_url, model, activated_at) {
+                        (None, None, None) => Ok(None),
+                        (Some(base_url), Some(model), Some(activated_at)) => {
+                            Ok(Some(EmbeddingConfiguration {
+                                base_url,
+                                model,
+                                activated_at,
+                            }))
+                        }
+                        _ => Err(rusqlite::Error::InvalidQuery),
+                    }
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn retrieval_epoch(&self) -> Result<i64> {
+        Ok(self.connection.query_row(
+            "SELECT retrieval_epoch FROM memory_index_settings WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Persist a local embedding selection only after every currently
+    /// eligible memory has a revision-matched vector from that model.
+    pub fn activate_memory_embedding_configuration(
+        &mut self,
+        base_url: &str,
+        model: &str,
+    ) -> Result<EmbeddingConfiguration> {
+        if base_url.trim().is_empty()
+            || base_url.len() > 2_048
+            || model.trim().is_empty()
+            || model.len() > 256
+        {
+            return Err(VaultError::InvalidInput(
+                "embedding configuration is invalid",
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        let missing: i64 = transaction.query_row(
+            "SELECT count(*) FROM memory_records
+             JOIN messages AS source ON source.id = memory_records.source_message_id
+             LEFT JOIN memory_embeddings
+               ON memory_embeddings.memory_id = memory_records.id
+              AND memory_embeddings.memory_revision = memory_records.revision
+              AND memory_embeddings.model = ?1
+             WHERE memory_records.deleted = 0
+               AND source.role = 'user'
+               AND memory_embeddings.memory_id IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM memory_exclusions
+                   WHERE source_message_id = memory_records.source_message_id
+               )",
+            [model],
+            |row| row.get(0),
+        )?;
+        if missing != 0 {
+            return Err(VaultError::InvalidInput(
+                "embedding rebuild is not complete",
+            ));
+        }
+        let activated_at = now_rfc3339();
+        transaction.execute(
+            "UPDATE memory_index_settings
+             SET base_url = ?1, model = ?2, activated_at = ?3,
+                 retrieval_epoch = retrieval_epoch + 1
+             WHERE singleton = 1",
+            params![base_url, model, activated_at],
+        )?;
+        transaction.commit()?;
+        Ok(EmbeddingConfiguration {
+            base_url: base_url.to_owned(),
+            model: model.to_owned(),
+            activated_at,
+        })
+    }
+
+    pub fn clear_memory_embedding_configuration(&mut self) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "UPDATE memory_index_settings
+             SET base_url = NULL, model = NULL, activated_at = NULL,
+                 retrieval_epoch = retrieval_epoch + 1
+             WHERE singleton = 1",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Return only memory rows that still need an embedding for this model.
@@ -2430,6 +2546,18 @@ fn delete_retrieval_for_session(transaction: &Transaction<'_>, session_id: &str)
     Ok(())
 }
 
+fn bump_retrieval_epoch(transaction: &Transaction<'_>) -> Result<()> {
+    let changed = transaction.execute(
+        "UPDATE memory_index_settings
+         SET retrieval_epoch = retrieval_epoch + 1 WHERE singleton = 1",
+        [],
+    )?;
+    if changed != 1 {
+        return Err(VaultError::CorruptDatabase);
+    }
+    Ok(())
+}
+
 fn insert_message(transaction: &Transaction<'_>, message: &Message) -> Result<()> {
     transaction.execute(
         "INSERT INTO messages (id, session_id, role, content, status, created_at)
@@ -2855,7 +2983,21 @@ fn retrieval_schema_sql() -> &'static str {
          singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
          last_rebuilt_at TEXT
      );
-     INSERT INTO memory_index_state (singleton, last_rebuilt_at) VALUES (1, NULL);"
+     INSERT INTO memory_index_state (singleton, last_rebuilt_at) VALUES (1, NULL);
+     CREATE TABLE memory_index_settings (
+         singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+         base_url TEXT,
+         model TEXT,
+         activated_at TEXT,
+         retrieval_epoch INTEGER NOT NULL CHECK (retrieval_epoch >= 1),
+         CHECK ((base_url IS NULL AND model IS NULL AND activated_at IS NULL)
+             OR (length(base_url) BETWEEN 1 AND 2048
+                 AND length(model) BETWEEN 1 AND 256
+                 AND activated_at IS NOT NULL))
+     );
+     INSERT INTO memory_index_settings
+         (singleton, base_url, model, activated_at, retrieval_epoch)
+     VALUES (1, NULL, NULL, NULL, 1);"
 }
 
 fn migrate_schema(connection: &Connection) -> Result<()> {
@@ -2945,9 +3087,29 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             transaction.commit()?;
             Ok(())
         }
-        version if version == SCHEMA_VERSION as i64 => Ok(()),
+        version if version == SCHEMA_VERSION as i64 => {
+            connection.execute_batch(memory_index_settings_schema_sql())?;
+            Ok(())
+        }
         _ => Err(VaultError::CorruptDatabase),
     }
+}
+
+fn memory_index_settings_schema_sql() -> &'static str {
+    "CREATE TABLE IF NOT EXISTS memory_index_settings (
+         singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+         base_url TEXT,
+         model TEXT,
+         activated_at TEXT,
+         retrieval_epoch INTEGER NOT NULL CHECK (retrieval_epoch >= 1),
+         CHECK ((base_url IS NULL AND model IS NULL AND activated_at IS NULL)
+             OR (length(base_url) BETWEEN 1 AND 2048
+                 AND length(model) BETWEEN 1 AND 256
+                 AND activated_at IS NOT NULL))
+     );
+     INSERT OR IGNORE INTO memory_index_settings
+         (singleton, base_url, model, activated_at, retrieval_epoch)
+     VALUES (1, NULL, NULL, NULL, 1);"
 }
 
 fn rebuild_retrieval_in_migration(transaction: &Transaction<'_>) -> Result<()> {
@@ -3034,12 +3196,12 @@ fn validate_schema(connection: &Connection) -> Result<()> {
                  ('sessions', 'messages', 'notes_jobs', 'user_notes', 'memory_records',
                   'memory_exclusions', 'provider_settings', 'reading_settings',
                   'memory_fts', 'memory_embeddings', 'memory_view_memberships',
-                  'memory_report_times', 'memory_index_state', 'lifecycle_settings')",
+                  'memory_report_times', 'memory_index_state', 'lifecycle_settings', 'memory_index_settings')",
             [],
             |row| row.get(0),
         )
         .map_err(|_| VaultError::CorruptDatabase)?;
-    if table_count != 14 {
+    if table_count != 15 {
         return Err(VaultError::CorruptDatabase);
     }
     Ok(())
@@ -3875,6 +4037,67 @@ mod tests {
     }
 
     #[test]
+    fn embedding_selection_activates_only_after_a_model_consistent_index() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let memory = save_synthetic_memory(
+            &mut vault,
+            &session.id,
+            "I prefer a brief recap at the end.",
+            MemoryKind::Preference,
+            "Prefers a brief recap at the end",
+            "brief recap",
+        );
+        assert!(vault
+            .activate_memory_embedding_configuration("http://127.0.0.1:11434", "synthetic-embed")
+            .is_err());
+        assert!(vault
+            .memory_embedding_configuration()
+            .expect("configuration")
+            .is_none());
+
+        vault
+            .store_memory_embedding(
+                &memory.id,
+                memory.revision,
+                &QueryEmbedding {
+                    model: "synthetic-embed".into(),
+                    vector: vec![0.5, 0.5],
+                },
+            )
+            .expect("store embedding");
+        let configuration = vault
+            .activate_memory_embedding_configuration("http://127.0.0.1:11434", "synthetic-embed")
+            .expect("activate complete index");
+        assert_eq!(configuration.model, "synthetic-embed");
+        assert_eq!(
+            vault.memory_index_status().expect("status").state,
+            MemoryIndexState::Ready
+        );
+
+        vault
+            .edit_memory(&memory.id, "Prefers no recap", memory.revision)
+            .expect("correct memory");
+        let status = vault.memory_index_status().expect("degraded status");
+        assert_eq!(status.state, MemoryIndexState::Degraded);
+        assert_eq!(
+            vault
+                .pending_embedding_sources("synthetic-embed", 8)
+                .expect("pending source")
+                .len(),
+            1
+        );
+        vault
+            .clear_memory_embedding_configuration()
+            .expect("clear configuration");
+        assert!(vault
+            .memory_embedding_configuration()
+            .expect("cleared configuration")
+            .is_none());
+    }
+
+    #[test]
     #[ignore = "manual representative-scale benchmark; run with --ignored --nocapture"]
     fn retrieval_benchmark_at_1k_10k_and_100k_records() {
         let directory = temp_vault_dir();
@@ -3968,6 +4191,7 @@ mod tests {
                  DROP TABLE memory_view_memberships;
                  DROP TABLE memory_report_times;
                  DROP TABLE memory_index_state;
+                 DROP TABLE memory_index_settings;
                  DROP TABLE memory_records;
                  DROP TABLE memory_exclusions;
                  DROP TABLE user_notes;
@@ -4010,6 +4234,7 @@ mod tests {
                  DROP TABLE memory_view_memberships;
                  DROP TABLE memory_report_times;
                  DROP TABLE memory_index_state;
+                 DROP TABLE memory_index_settings;
                  DROP TABLE memory_exclusions;
                  DROP TABLE memory_records;
                  ALTER TABLE notes_jobs DROP COLUMN notes_enabled;
@@ -4110,6 +4335,7 @@ mod tests {
                  DROP TABLE memory_view_memberships;
                  DROP TABLE memory_report_times;
                  DROP TABLE memory_index_state;
+                 DROP TABLE memory_index_settings;
                  DROP TABLE memory_records;
                  DROP TABLE memory_exclusions;
                  DROP TABLE user_notes;
@@ -4172,6 +4398,7 @@ mod tests {
                  DROP TABLE memory_view_memberships;
                  DROP TABLE memory_report_times;
                  DROP TABLE memory_index_state;
+                 DROP TABLE memory_index_settings;
                  ALTER TABLE notes_jobs DROP COLUMN notes_enabled;
                  ALTER TABLE notes_jobs DROP COLUMN memory_enabled;
                  ALTER TABLE sessions DROP COLUMN notes_enabled;
