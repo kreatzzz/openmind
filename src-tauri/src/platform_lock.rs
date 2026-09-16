@@ -367,7 +367,9 @@ mod macos_impl {
     impl Drop for Monitor {
         fn drop(&mut self) {
             for observer in &self.observers {
-                unsafe { self.center.removeObserver(observer.as_ref().as_ref()) };
+                let observer: &ProtocolObject<dyn NSObjectProtocol> = observer;
+                let observer: &objc2::runtime::AnyObject = observer.as_ref();
+                unsafe { self.center.removeObserver(observer) };
             }
         }
     }
