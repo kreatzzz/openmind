@@ -18,7 +18,7 @@ export function RestoreWorkspace({
       const file = await open({
         title: "Restore encrypted workspace",
         multiple: false,
-        filters: [{ name: "Openmind backup", extensions: ["openmind"] }],
+        filters: [{ name: "Openmind backup", extensions: ["openmind-backup"] }],
       });
       if (typeof file === "string") setPath(file);
     } catch (reason) {

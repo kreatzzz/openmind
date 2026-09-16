@@ -623,10 +623,16 @@
   font-size: 17px;
   font-weight: 600;
 }
+.settings-dialog > .dialog-heading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg);
+}
 .settings-section input:not([type="checkbox"]):not([type="range"]),
 .settings-section select,
 .onboarding-form input {
-  border-color: var(--line-strong);
+  border-color: var(--field);
   height: 40px;
   border-radius: 6px;
 }
@@ -785,7 +791,7 @@
 }
 .onboarding-form input {
   width: 100%;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--field);
   background: var(--bg);
   padding: 0 12px;
   color: var(--ink);
@@ -931,6 +937,47 @@
 .settings-layout {
   display: flex;
   min-height: 480px;
+}
+.memory-index-settings {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+.settings-subheading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.settings-subheading h4 {
+  margin: 0 0 5px;
+  font-size: 14px;
+}
+.settings-subheading p {
+  color: var(--muted);
+  font-size: 12px;
+}
+.index-status {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  margin: 18px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.index-status div {
+  padding: 10px;
+  background: var(--bg);
+}
+.index-status dt {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.index-status dd {
+  margin: 4px 0 0;
+  font-size: 12px;
 }
 .settings-navigation {
   width: 190px;

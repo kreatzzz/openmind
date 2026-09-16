@@ -132,6 +132,11 @@ export interface SessionPlan {
   nextAt: string;
   revision: number;
 }
+export interface DuePlan {
+  id: string;
+  notifications: boolean;
+  scheduledAt: string;
+}
 export type PlanInput = Pick<
   SessionPlan,
   "label" | "localStart" | "timezone" | "recurrence" | "notifications"
@@ -149,6 +154,24 @@ export interface BackupSummary {
 export interface RestoreResult {
   status: VaultStatus;
   summary: BackupSummary;
+}
+export interface MemoryEmbeddingConfiguration {
+  baseUrl: string;
+  model: string;
+}
+export interface MemoryIndexStatus {
+  state: "ready" | "degraded";
+  lexicalIndexed: number;
+  eligibleRecords: number;
+  semanticIndexed: number;
+  staleEmbeddings: number;
+  embeddingModels: string[];
+  lastRebuiltAt: string | null;
+  activeEmbedding: {
+    baseUrl: string;
+    model: string;
+    activatedAt: string;
+  } | null;
 }
 
 function native<T>(
@@ -175,9 +198,9 @@ export const desktop = {
   onVaultLocked: (listener: () => void): Promise<UnlistenFn> =>
     listen("vault-locked", listener),
   onPlannedSessionDue: (
-    listener: (plan: SessionPlan) => void,
+    listener: (plans: DuePlan[]) => void,
   ): Promise<UnlistenFn> =>
-    listen<SessionPlan>("planned-session-due", (event) =>
+    listen<DuePlan[]>("planned-session-due", (event) =>
       listener(event.payload),
     ),
   getProviderSettings: () => native<ProviderSettings>("get_provider_settings"),
@@ -222,6 +245,16 @@ export const desktop = {
       idleLockMinutes,
       retentionDays,
     }),
+  getMemoryIndexStatus: () =>
+    native<MemoryIndexStatus>("get_memory_index_status"),
+  getMemoryEmbeddingConfiguration: () =>
+    native<MemoryEmbeddingConfiguration | null>(
+      "get_memory_embedding_configuration",
+    ),
+  rebuildMemoryIndex: (baseUrl: string, model: string) =>
+    native<MemoryIndexStatus>("rebuild_memory_index", { baseUrl, model }),
+  clearMemoryEmbeddingConfiguration: () =>
+    native<MemoryIndexStatus>("clear_memory_embedding_configuration"),
   exportBackup: (path: string, backupPassphrase: string) =>
     native<BackupSummary>("export_vault_backup", { path, backupPassphrase }),
   restoreBackup: (

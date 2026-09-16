@@ -76,8 +76,10 @@ export function PrivacySettings({
           throw new Error("The backup passphrases do not match.");
         const path = await save({
           title: "Save encrypted backup",
-          defaultPath: `openmind-${new Date().toISOString().slice(0, 10)}.openmind`,
-          filters: [{ name: "Openmind backup", extensions: ["openmind"] }],
+          defaultPath: `openmind-${new Date().toISOString().slice(0, 10)}.openmind-backup`,
+          filters: [
+            { name: "Openmind backup", extensions: ["openmind-backup"] },
+          ],
         });
         if (!path) return;
         const result = await desktop.exportBackup(path, password);

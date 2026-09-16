@@ -35,6 +35,8 @@ import { PlannedSessions } from "./components/PlannedSessions";
 import { PrivacySettings } from "./components/PrivacySettings";
 import { RestoreWorkspace } from "./components/RestoreWorkspace";
 import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
+import { MemoryIndexSettings } from "./components/MemoryIndexSettings";
+import { resetSamplePlans } from "./lib/plans";
 import {
   AppearanceSettings,
   COLOR_THEMES,
@@ -168,6 +170,7 @@ export default function App() {
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [home, setHome] = useState(true);
   const [plansOpen, setPlansOpen] = useState(false);
+  const [plansRevision, setPlansRevision] = useState(0);
   const [duePlan, setDuePlan] = useState<string | null>(null);
   const [colorTheme, setColorTheme] = useState(() => {
     try {
@@ -375,7 +378,9 @@ export default function App() {
     let disposed = false;
     const unlisten = Promise.all([
       desktop.onVaultLocked(() => clearRendererForLock()),
-      desktop.onPlannedSessionDue((plan) => setDuePlan(plan.label)),
+      desktop.onPlannedSessionDue((plans) => {
+        if (plans.length) setDuePlan("Your planned session is ready.");
+      }),
     ]);
     return () => {
       disposed = true;
@@ -407,13 +412,37 @@ export default function App() {
     if (!isDesktop || sample || screen !== "conversation") return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let attempts = 0;
-    const resume = async () => {
-      if (cancelled || activeTurn.current) return;
-      attempts += 1;
+    let passes = 0;
+    const schedule = (delay: number) => {
+      if (!cancelled && passes < 4)
+        timer = setTimeout(() => void inspect(), delay);
+    };
+    const inspect = async () => {
+      if (cancelled) return;
+      if (activeTurn.current || sending) {
+        schedule(2_000);
+        return;
+      }
       try {
         const jobs = await desktop.listNoteJobs();
-        if (cancelled || !jobs.some((job) => job.status === "pending")) return;
+        if (cancelled) return;
+        const retryable = jobs.filter(
+          (job) =>
+            job.status === "pending" ||
+            (job.status === "failed" && job.attemptCount < 3),
+        );
+        if (!retryable.length) return;
+        const dueAt = Math.min(
+          ...retryable.map((job) =>
+            job.nextAttemptAt ? Date.parse(job.nextAttemptAt) : Date.now(),
+          ),
+        );
+        const delay = Math.max(0, Math.min(30_000, dueAt - Date.now()));
+        if (delay > 0) {
+          schedule(delay);
+          return;
+        }
+        passes += 1;
         await desktop.resumeNoteJobs((event) => {
           if (cancelled || event.type !== "notes") return;
           const status = formatDerivationStatus(
@@ -434,17 +463,18 @@ export default function App() {
             setMemories(loadedMemories);
           }
         }
+        schedule(Math.min(30_000, 2_000 * 2 ** (passes - 1)));
       } catch {
-        if (!cancelled && attempts < 3)
-          timer = setTimeout(() => void resume(), attempts * 2_000);
+        passes += 1;
+        schedule(Math.min(30_000, 2_000 * 2 ** (passes - 1)));
       }
     };
-    void resume();
+    void inspect();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [sample, screen]);
+  }, [sample, screen, sending]);
   useEffect(() => {
     if (atBottom.current && scroll.current)
       scroll.current.scrollTop = scroll.current.scrollHeight;
@@ -479,6 +509,8 @@ export default function App() {
     }
   }
   async function exploreSample() {
+    resetSamplePlans();
+    setPlansRevision((value) => value + 1);
     if (isDesktop) {
       setBusy(true);
       setError("");
@@ -565,6 +597,7 @@ export default function App() {
     setError("");
   }
   function exitSample() {
+    resetSamplePlans();
     generation.current++;
     setProvider("ollama");
     setBaseUrl("http://127.0.0.1:11434");
@@ -707,6 +740,7 @@ export default function App() {
     }
   }
   function clearRendererForLock() {
+    resetSamplePlans();
     generation.current++;
     turnGeneration.current++;
     activeTurn.current = false;
@@ -1040,20 +1074,23 @@ export default function App() {
               desktop.listNotes(),
               desktop.listMemories(),
             ]);
-          if (generation.current === request) {
+          if (
+            generation.current === request &&
+            turnGeneration.current === turn
+          ) {
             setSessions(updatedSessions);
             setUserNotes(updatedNotes);
             setMemories(updatedMemories);
           }
         } catch {
-          if (generation.current === request)
+          if (generation.current === request && turnGeneration.current === turn)
             setError(
               (current) =>
                 current || "Conversation history could not be refreshed.",
             );
         }
       }
-      if (generation.current === request) {
+      if (generation.current === request && turnGeneration.current === turn) {
         activeTurn.current = false;
         setSending(false);
         setMessages((current) =>
@@ -1357,9 +1394,14 @@ export default function App() {
                 <span className="header-date">
                   {memoryView
                     ? `${memories.length} ${memories.length === 1 ? "item" : "items"}`
-                    : session
-                      ? dateLabel(session.createdAt)
-                      : "A fresh page"}
+                    : home
+                      ? new Date().toLocaleDateString(undefined, {
+                          month: "long",
+                          day: "numeric",
+                        })
+                      : session
+                        ? dateLabel(session.createdAt)
+                        : "A fresh page"}
                 </span>
               </div>
               <div className="header-actions">
@@ -1429,6 +1471,7 @@ export default function App() {
               )}
             {home ? (
               <HomeWorkspace
+                plansRevision={plansRevision}
                 sessions={sessions}
                 notes={userNotes}
                 memories={memories}
@@ -1965,6 +2008,7 @@ export default function App() {
                   >
                     Open your notes
                   </button>
+                  <MemoryIndexSettings sample={sample} />
                 </div>
               )}
             </div>
@@ -1989,7 +2033,10 @@ export default function App() {
       )}
       {plansOpen && (
         <Dialog title="Planned sessions" onClose={() => setPlansOpen(false)}>
-          <PlannedSessions sample={sample} />
+          <PlannedSessions
+            sample={sample}
+            onChanged={() => setPlansRevision((value) => value + 1)}
+          />
         </Dialog>
       )}
     </div>

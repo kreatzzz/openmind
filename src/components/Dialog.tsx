@@ -1,6 +1,9 @@
 import { useEffect, useId, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
 
+let openDialogs = 0;
+let previousBodyOverflow = "";
+
 export function Dialog({
   title,
   children,
@@ -17,9 +20,17 @@ export function Dialog({
   useEffect(() => {
     const element = ref.current;
     const previous = document.activeElement;
+    if (openDialogs === 0) {
+      previousBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    }
+    openDialogs += 1;
     element?.showModal();
     return () => {
       element?.close();
+      openDialogs = Math.max(0, openDialogs - 1);
+      if (openDialogs === 0)
+        document.body.style.overflow = previousBodyOverflow;
       if (previous instanceof HTMLElement) previous.focus();
     };
   }, []);

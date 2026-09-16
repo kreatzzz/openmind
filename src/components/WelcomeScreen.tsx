@@ -99,6 +99,7 @@ export function WelcomeScreen({
                 </label>
                 <input
                   id="passphrase"
+                  aria-label="Your passphrase"
                   type="password"
                   autoComplete={setup ? "new-password" : "current-password"}
                   value={passphrase}
@@ -133,7 +134,11 @@ export function WelcomeScreen({
                     <span>{error}</span>
                   </div>
                 )}
-                <button className="primary-button wide" disabled={busy}>
+                <button
+                  className="primary-button wide"
+                  aria-label={setup ? "Create your vault" : "Unlock your vault"}
+                  disabled={busy}
+                >
                   {busy
                     ? "Opening…"
                     : setup
@@ -154,6 +159,15 @@ export function WelcomeScreen({
                   disabled={busy}
                 >
                   Restore from a backup
+                </button>
+              )}
+              {screen === "locked" && (
+                <button
+                  className="text-button onboarding-secondary"
+                  onClick={onExploreSample}
+                  disabled={busy}
+                >
+                  Explore with example conversations
                 </button>
               )}
             </>
