@@ -22,6 +22,11 @@ use crate::{
     app_settings::{LineWidth, NoteJob, ProviderSettings, ReadingSettings, DEFAULT_OLLAMA_URL},
     engine::ProviderKind,
 };
+use crate::retrieval::{
+    cosine_similarity, decode_vector, encode_vector, fts_query, fuse_rankings, EmbeddingSource,
+    MemoryIndexState, MemoryIndexStatus, MemoryView, QueryEmbedding, RetrievalOptions,
+    RetrievalResult, RetrievedMemory, MAX_RETRIEVAL_CANDIDATES, MIN_SEMANTIC_SIMILARITY,
+};
 
 pub const DATABASE_FILE_NAME: &str = "vault.db";
 pub const ENVELOPE_FILE_NAME: &str = "vault.key";
@@ -34,7 +39,7 @@ pub const MAX_ASSISTANT_CHUNK_CHARS: usize = 32_000;
 pub const MAX_ASSISTANT_MESSAGE_CHARS: usize = 200_000;
 pub const MAX_SESSION_TITLE_CHARS: usize = 120;
 
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 const DB_KEY_LENGTH: usize = 32;
 const ENVELOPE_SALT_LENGTH: usize = 16;
 const ENVELOPE_NONCE_LENGTH: usize = 24;
@@ -654,6 +659,7 @@ impl Vault {
         let session_id = canonical_id(session_id, "session ID")?;
         let transaction = self.connection.transaction()?;
         ensure_session(&transaction, &session_id)?;
+        delete_retrieval_for_session(&transaction, &session_id)?;
         transaction.execute("DELETE FROM sessions WHERE id = ?1", [&session_id])?;
         transaction.commit()?;
         Ok(())
@@ -776,6 +782,22 @@ impl Vault {
         if changed != 1 {
             return Err(VaultError::MemoryRevisionConflict);
         }
+        transaction.execute("DELETE FROM memory_fts WHERE memory_id = ?1", [&memory_id])?;
+        transaction.execute(
+            "INSERT INTO memory_fts (memory_id, revision, kind, content, evidence_quote)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                memory_id,
+                expected_revision + 1,
+                existing.memory.kind.as_db_value(),
+                content,
+                existing.memory.evidence_quote,
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM memory_embeddings WHERE memory_id = ?1",
+            [&memory_id],
+        )?;
         let updated = memory_with_deleted_from_id(&transaction, &memory_id)?;
         transaction.commit()?;
         Ok(updated.memory)
@@ -799,6 +821,20 @@ impl Vault {
 
         let source_message_id = existing.memory.source_message_id.clone();
         let timestamp = now_rfc3339();
+        transaction.execute(
+            "DELETE FROM memory_fts
+             WHERE memory_id IN (
+                 SELECT id FROM memory_records WHERE source_message_id = ?1
+             )",
+            [&source_message_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM memory_embeddings
+             WHERE memory_id IN (
+                 SELECT id FROM memory_records WHERE source_message_id = ?1
+             )",
+            [&source_message_id],
+        )?;
         transaction.execute(
             "UPDATE memory_records
              SET deleted = 1, content = '', evidence_quote = '',
@@ -1158,6 +1194,7 @@ impl Vault {
         let timestamp = now_rfc3339();
         if memory_enabled {
             for candidate in &patch.memories {
+                let memory_id = Uuid::new_v4().to_string();
                 transaction.execute(
                     "INSERT INTO memory_records
                      (id, session_id, source_message_id, assistant_message_id,
@@ -1166,7 +1203,7 @@ impl Vault {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'user_reported',
                              1, 0, 0, ?8, ?8)",
                     params![
-                        Uuid::new_v4().to_string(),
+                        memory_id,
                         user.session_id,
                         user.id,
                         assistant_id,
@@ -1175,6 +1212,15 @@ impl Vault {
                         candidate.evidence_quote,
                         timestamp,
                     ],
+                )?;
+                index_memory_record(
+                    &transaction,
+                    &memory_id,
+                    1,
+                    candidate.kind,
+                    &candidate.content,
+                    &candidate.evidence_quote,
+                    &user.created_at,
                 )?;
             }
         }
@@ -1253,6 +1299,422 @@ impl Vault {
             context.push_str(&line);
         }
         Ok(context)
+    }
+
+    /// Retrieve relevant memories with lexical search and optional exact
+    /// semantic scan, then pack complete source-backed units into the budget.
+    pub fn retrieve_memory_context(
+        &self,
+        query: &str,
+        options: &RetrievalOptions,
+    ) -> Result<RetrievalResult> {
+        if query.trim().is_empty() || options.max_bytes == 0 || options.max_records == 0 {
+            return Ok(RetrievalResult::default());
+        }
+
+        let lexical = if let Some(query) = fts_query(query) {
+            let mut statement = self.connection.prepare(
+                "SELECT memory_fts.memory_id
+                 FROM memory_fts
+                 JOIN memory_records ON memory_records.id = memory_fts.memory_id
+                 JOIN messages AS source ON source.id = memory_records.source_message_id
+                 WHERE memory_fts MATCH ?1
+                   AND memory_records.deleted = 0
+                   AND source.role = 'user'
+                   AND memory_fts.revision = memory_records.revision
+                   AND NOT EXISTS (
+                       SELECT 1 FROM memory_exclusions
+                       WHERE source_message_id = memory_records.source_message_id
+                   )
+                 ORDER BY memory_fts.rank
+                 LIMIT ?2",
+            )?;
+            let rows = statement
+                .query_map(params![query, MAX_RETRIEVAL_CANDIDATES as i64], |row| {
+                    row.get::<_, String>(0)
+                })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+
+        let semantic = match options.query_embedding.as_ref() {
+            Some(query_embedding)
+                if !query_embedding.vector.is_empty()
+                    && query_embedding.vector.iter().all(|value| value.is_finite()) =>
+            {
+                let mut statement = self.connection.prepare(
+                    "SELECT memory_embeddings.memory_id, memory_embeddings.dimensions,
+                            memory_embeddings.vector
+                     FROM memory_embeddings
+                     JOIN memory_records ON memory_records.id = memory_embeddings.memory_id
+                     JOIN messages AS source ON source.id = memory_records.source_message_id
+                     WHERE memory_embeddings.model = ?1
+                       AND memory_embeddings.dimensions = ?2
+                       AND memory_embeddings.memory_revision = memory_records.revision
+                       AND memory_records.deleted = 0
+                       AND source.role = 'user'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM memory_exclusions
+                           WHERE source_message_id = memory_records.source_message_id
+                       )",
+                )?;
+                let mut rows = statement.query(params![
+                    query_embedding.model,
+                    query_embedding.vector.len() as i64
+                ])?;
+                let mut scored = Vec::new();
+                while let Some(row) = rows.next()? {
+                    let memory_id: String = row.get(0)?;
+                    let dimensions: i64 = row.get(1)?;
+                    let bytes: Vec<u8> = row.get(2)?;
+                    let Some(vector) = usize::try_from(dimensions)
+                        .ok()
+                        .and_then(|dimensions| decode_vector(&bytes, dimensions))
+                    else {
+                        continue;
+                    };
+                    if let Some(score) = cosine_similarity(&query_embedding.vector, &vector) {
+                        if score >= MIN_SEMANTIC_SIMILARITY {
+                            scored.push((memory_id, score));
+                        }
+                    }
+                }
+                scored.sort_by(|left, right| {
+                    right
+                        .1
+                        .total_cmp(&left.1)
+                        .then_with(|| left.0.cmp(&right.0))
+                });
+                scored
+                    .into_iter()
+                    .take(MAX_RETRIEVAL_CANDIDATES)
+                    .map(|(id, _)| id)
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+
+        let ranked = fuse_rankings(&lexical, &semantic);
+        let candidate_count = ranked.len();
+        let mut context = String::new();
+        let mut matches = Vec::new();
+        for candidate in ranked.into_iter().take(MAX_RETRIEVAL_CANDIDATES) {
+            let record: Option<(String, String, String, String, i64, String, String)> = self
+                .connection
+                .query_row(
+                    "SELECT memory_records.source_message_id, memory_records.kind,
+                            memory_records.content, memory_records.evidence_state,
+                            memory_records.revision, memory_records.evidence_quote,
+                            COALESCE(memory_report_times.reported_at, source.created_at)
+                     FROM memory_records
+                     JOIN messages AS source ON source.id = memory_records.source_message_id
+                     LEFT JOIN memory_report_times
+                       ON memory_report_times.memory_id = memory_records.id
+                     WHERE memory_records.id = ?1
+                       AND memory_records.deleted = 0
+                       AND source.role = 'user'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM memory_exclusions
+                           WHERE source_message_id = memory_records.source_message_id
+                       )",
+                    [&candidate.memory_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((
+                source_message_id,
+                kind,
+                content,
+                evidence_state,
+                revision,
+                quote,
+                reported_at,
+            )) = record
+            else {
+                continue;
+            };
+            let line = format!(
+                "- [{kind}; {evidence_state}; reported {reported_at}; source {source_message_id}] {} (evidence: {})\n",
+                one_line(&content),
+                one_line(&quote),
+            );
+            if line.len() > options.max_bytes.saturating_sub(context.len()) {
+                continue;
+            }
+            context.push_str(&line);
+            matches.push(RetrievedMemory {
+                memory_id: candidate.memory_id,
+                source_message_id,
+                revision,
+                lexical_rank: candidate.lexical_rank,
+                semantic_rank: candidate.semantic_rank,
+                fused_score: candidate.fused_score,
+            });
+            if matches.len() >= options.max_records {
+                break;
+            }
+        }
+        Ok(RetrievalResult {
+            context,
+            omitted_count: candidate_count.saturating_sub(matches.len()),
+            matches,
+        })
+    }
+
+    /// Atomically rebuild lexical and view metadata from current eligible
+    /// memory rows. Raw transcript turns are never scanned or backfilled.
+    pub fn rebuild_memory_index(&mut self) -> Result<MemoryIndexStatus> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM memory_fts", [])?;
+        transaction.execute("DELETE FROM memory_view_memberships", [])?;
+        transaction.execute("DELETE FROM memory_report_times", [])?;
+        transaction.execute(
+            "DELETE FROM memory_embeddings
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM memory_records
+                 WHERE memory_records.id = memory_embeddings.memory_id
+                   AND memory_records.deleted = 0
+                   AND memory_records.revision = memory_embeddings.memory_revision
+                   AND NOT EXISTS (
+                       SELECT 1 FROM memory_exclusions
+                       WHERE source_message_id = memory_records.source_message_id
+                   )
+             )",
+            [],
+        )?;
+        {
+            let mut statement = transaction.prepare(
+                "SELECT memory_records.id, memory_records.revision, memory_records.kind,
+                        memory_records.content, memory_records.evidence_quote, source.created_at
+                 FROM memory_records
+                 JOIN messages AS source ON source.id = memory_records.source_message_id
+                 WHERE memory_records.deleted = 0
+                   AND source.role = 'user'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM memory_exclusions
+                       WHERE source_message_id = memory_records.source_message_id
+                   )",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, revision, kind, content, quote, reported_at) = row?;
+                let kind = MemoryKind::from_db_value(&kind).ok_or(VaultError::CorruptDatabase)?;
+                index_memory_record(
+                    &transaction,
+                    &id,
+                    revision,
+                    kind,
+                    &content,
+                    &quote,
+                    &reported_at,
+                )?;
+            }
+        }
+        transaction.execute(
+            "UPDATE memory_index_state SET last_rebuilt_at = ?1 WHERE singleton = 1",
+            [now_rfc3339()],
+        )?;
+        transaction.commit()?;
+        self.memory_index_status()
+    }
+
+    pub fn memory_index_status(&self) -> Result<MemoryIndexStatus> {
+        let eligible_records: i64 = self.connection.query_row(
+            "SELECT count(*) FROM memory_records
+             JOIN messages AS source ON source.id = memory_records.source_message_id
+             WHERE memory_records.deleted = 0 AND source.role = 'user'
+               AND NOT EXISTS (
+                   SELECT 1 FROM memory_exclusions
+                   WHERE source_message_id = memory_records.source_message_id
+               )",
+            [],
+            |row| row.get(0),
+        )?;
+        let lexical_indexed: i64 = self.connection.query_row(
+            "SELECT count(*) FROM memory_fts
+             JOIN memory_records ON memory_records.id = memory_fts.memory_id
+             WHERE memory_records.deleted = 0
+               AND memory_fts.revision = memory_records.revision",
+            [],
+            |row| row.get(0),
+        )?;
+        let semantic_indexed: i64 = self.connection.query_row(
+            "SELECT count(*) FROM memory_embeddings
+             JOIN memory_records ON memory_records.id = memory_embeddings.memory_id
+             WHERE memory_records.deleted = 0
+               AND memory_embeddings.memory_revision = memory_records.revision",
+            [],
+            |row| row.get(0),
+        )?;
+        let stale_embeddings: i64 = self.connection.query_row(
+            "SELECT count(*) FROM memory_embeddings
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM memory_records
+                 WHERE memory_records.id = memory_embeddings.memory_id
+                   AND memory_records.deleted = 0
+                   AND memory_records.revision = memory_embeddings.memory_revision
+                   AND NOT EXISTS (
+                       SELECT 1 FROM memory_exclusions
+                       WHERE source_message_id = memory_records.source_message_id
+                   )
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut models_statement = self
+            .connection
+            .prepare("SELECT DISTINCT model FROM memory_embeddings ORDER BY model")?;
+        let embedding_models = models_statement
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        let last_rebuilt_at = self.connection.query_row(
+            "SELECT last_rebuilt_at FROM memory_index_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(MemoryIndexStatus {
+            state: if eligible_records == lexical_indexed && stale_embeddings == 0 {
+                MemoryIndexState::Ready
+            } else {
+                MemoryIndexState::Degraded
+            },
+            lexical_indexed: usize::try_from(lexical_indexed).unwrap_or(usize::MAX),
+            eligible_records: usize::try_from(eligible_records).unwrap_or(usize::MAX),
+            semantic_indexed: usize::try_from(semantic_indexed).unwrap_or(usize::MAX),
+            stale_embeddings: usize::try_from(stale_embeddings).unwrap_or(usize::MAX),
+            embedding_models,
+            last_rebuilt_at,
+        })
+    }
+
+    /// Return only memory rows that still need an embedding for this model.
+    pub fn pending_embedding_sources(
+        &self,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<EmbeddingSource>> {
+        if model.trim().is_empty() || model.len() > 256 || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT memory_records.id, memory_records.revision, memory_records.content
+             FROM memory_records
+             JOIN messages AS source ON source.id = memory_records.source_message_id
+             LEFT JOIN memory_embeddings
+               ON memory_embeddings.memory_id = memory_records.id
+              AND memory_embeddings.model = ?1
+              AND memory_embeddings.memory_revision = memory_records.revision
+             WHERE memory_records.deleted = 0
+               AND source.role = 'user'
+               AND memory_embeddings.memory_id IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM memory_exclusions
+                   WHERE source_message_id = memory_records.source_message_id
+               )
+             ORDER BY memory_records.updated_at DESC, memory_records.id
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![model, limit.min(256) as i64], |row| {
+            Ok(EmbeddingSource {
+                memory_id: row.get(0)?,
+                revision: row.get(1)?,
+                content: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Commit an embedding only while the source record and its revision are
+    /// still active. Corrections and forgetting therefore reject late work.
+    pub fn store_memory_embedding(
+        &mut self,
+        memory_id: &str,
+        expected_revision: i64,
+        embedding: &QueryEmbedding,
+    ) -> Result<()> {
+        let memory_id = canonical_id(memory_id, "memory ID")?;
+        validate_revision(expected_revision)?;
+        if embedding.model.trim().is_empty() || embedding.model.len() > 256 {
+            return Err(VaultError::InvalidInput("embedding model is invalid"));
+        }
+        let bytes = encode_vector(&embedding.vector)
+            .ok_or(VaultError::InvalidInput("embedding vector is invalid"))?;
+        let transaction = self.connection.transaction()?;
+        let eligible: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM memory_records
+                 JOIN messages AS source ON source.id = memory_records.source_message_id
+                 WHERE memory_records.id = ?1
+                   AND memory_records.revision = ?2
+                   AND memory_records.deleted = 0
+                   AND source.role = 'user'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM memory_exclusions
+                       WHERE source_message_id = memory_records.source_message_id
+                   )
+             )",
+            params![memory_id, expected_revision],
+            |row| row.get(0),
+        )?;
+        if !eligible {
+            return Err(VaultError::MemoryRevisionConflict);
+        }
+        transaction.execute(
+            "INSERT INTO memory_embeddings
+                 (memory_id, memory_revision, model, dimensions, vector, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(memory_id) DO UPDATE SET
+                 memory_revision = excluded.memory_revision,
+                 model = excluded.model,
+                 dimensions = excluded.dimensions,
+                 vector = excluded.vector,
+                 created_at = excluded.created_at",
+            params![
+                memory_id,
+                expected_revision,
+                embedding.model,
+                embedding.vector.len() as i64,
+                bytes,
+                now_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn memory_views(&self, memory_id: &str) -> Result<Vec<MemoryView>> {
+        let memory_id = canonical_id(memory_id, "memory ID")?;
+        let mut statement = self.connection.prepare(
+            "SELECT view FROM memory_view_memberships
+             WHERE memory_id = ?1 ORDER BY view",
+        )?;
+        let mut rows = statement.query([memory_id])?;
+        let mut views = Vec::new();
+        while let Some(row) = rows.next()? {
+            let value: String = row.get(0)?;
+            views.push(MemoryView::from_db_value(&value).ok_or(VaultError::CorruptDatabase)?);
+        }
+        Ok(views)
     }
 
     pub fn append_user_message(&mut self, session_id: &str, content: &str) -> Result<Message> {
@@ -1732,6 +2194,74 @@ fn memory_context_line(
     }
 }
 
+fn one_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn default_memory_view(kind: MemoryKind) -> &'static str {
+    match kind {
+        MemoryKind::Person => "people_relationships",
+        MemoryKind::Event => "events_context",
+        MemoryKind::Goal => "goals_steps",
+        MemoryKind::Preference => "self_preferences",
+        MemoryKind::Concern => "concerns_themes",
+    }
+}
+
+fn index_memory_record(
+    transaction: &Transaction<'_>,
+    memory_id: &str,
+    revision: i64,
+    kind: MemoryKind,
+    content: &str,
+    evidence_quote: &str,
+    reported_at: &str,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO memory_fts (memory_id, revision, kind, content, evidence_quote)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            memory_id,
+            revision,
+            kind.as_db_value(),
+            content,
+            evidence_quote
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO memory_view_memberships (memory_id, view, facet)
+         VALUES (?1, ?2, NULL)
+         ON CONFLICT(memory_id, view) DO NOTHING",
+        params![memory_id, default_memory_view(kind)],
+    )?;
+    // Reporting time is authoritative message metadata. Event time remains
+    // NULL until an explicit, separately validated extraction supplies it.
+    transaction.execute(
+        "INSERT INTO memory_report_times
+             (memory_id, reported_at, event_start, event_end, event_precision)
+         VALUES (?1, ?2, NULL, NULL, NULL)
+         ON CONFLICT(memory_id) DO UPDATE SET reported_at = excluded.reported_at",
+        params![memory_id, reported_at],
+    )?;
+    Ok(())
+}
+
+fn delete_retrieval_for_session(transaction: &Transaction<'_>, session_id: &str) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM memory_fts WHERE memory_id IN (
+             SELECT id FROM memory_records WHERE session_id = ?1
+         )",
+        [session_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM memory_embeddings WHERE memory_id IN (
+             SELECT id FROM memory_records WHERE session_id = ?1
+         )",
+        [session_id],
+    )?;
+    Ok(())
+}
+
 fn insert_message(transaction: &Transaction<'_>, message: &Message) -> Result<()> {
     transaction.execute(
         "INSERT INTO messages (id, session_id, role, content, status, created_at)
@@ -1966,10 +2496,12 @@ fn notes_schema_sql() -> String {
          );
          CREATE INDEX user_notes_visible_idx
              ON user_notes (deleted, updated_at);
-         {memory_schema}",
+         {memory_schema}
+         {retrieval_schema}",
         MAX_CONTENT = MAX_CANDIDATE_CONTENT_CHARS,
         MAX_QUOTE = MAX_EVIDENCE_QUOTE_CHARS,
         memory_schema = memory_schema_sql(),
+        retrieval_schema = retrieval_schema_sql(),
     )
 }
 
@@ -2072,6 +2604,58 @@ fn memory_schema_sql() -> String {
     )
 }
 
+fn retrieval_schema_sql() -> &'static str {
+    "CREATE VIRTUAL TABLE memory_fts USING fts5(
+         memory_id UNINDEXED,
+         revision UNINDEXED,
+         kind,
+         content,
+         evidence_quote,
+         tokenize = 'unicode61 remove_diacritics 2',
+         prefix = '2 3'
+     );
+     CREATE TABLE memory_embeddings (
+         memory_id TEXT PRIMARY KEY NOT NULL,
+         memory_revision INTEGER NOT NULL CHECK (memory_revision >= 1),
+         model TEXT NOT NULL CHECK (length(model) BETWEEN 1 AND 256),
+         dimensions INTEGER NOT NULL CHECK (dimensions BETWEEN 1 AND 8192),
+         vector BLOB NOT NULL,
+         created_at TEXT NOT NULL,
+         FOREIGN KEY (memory_id) REFERENCES memory_records(id) ON DELETE CASCADE
+     );
+     CREATE INDEX memory_embeddings_model_idx
+         ON memory_embeddings (model, dimensions, memory_revision);
+     CREATE TABLE memory_view_memberships (
+         memory_id TEXT NOT NULL,
+         view TEXT NOT NULL CHECK (view IN (
+             'people_relationships', 'events_context', 'self_preferences',
+             'feelings_responses', 'concerns_themes', 'goals_steps',
+             'strengths_support'
+         )),
+         facet TEXT,
+         PRIMARY KEY (memory_id, view),
+         FOREIGN KEY (memory_id) REFERENCES memory_records(id) ON DELETE CASCADE
+     );
+     CREATE INDEX memory_view_memberships_view_idx
+         ON memory_view_memberships (view, memory_id);
+     CREATE TABLE memory_report_times (
+         memory_id TEXT PRIMARY KEY NOT NULL,
+         reported_at TEXT NOT NULL,
+         event_start TEXT,
+         event_end TEXT,
+         event_precision TEXT CHECK (event_precision IS NULL OR event_precision IN (
+             'exact', 'day', 'month', 'year', 'approximate'
+         )),
+         CHECK (event_start IS NOT NULL OR event_end IS NULL),
+         FOREIGN KEY (memory_id) REFERENCES memory_records(id) ON DELETE CASCADE
+     );
+     CREATE TABLE memory_index_state (
+         singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+         last_rebuilt_at TEXT
+     );
+     INSERT INTO memory_index_state (singleton, last_rebuilt_at) VALUES (1, NULL);"
+}
+
 fn migrate_schema(connection: &Connection) -> Result<()> {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -2127,6 +2711,8 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             add_session_settings(&transaction)?;
             add_notes_job_settings(&transaction)?;
             add_reliability_schema(&transaction)?;
+            transaction.execute_batch(retrieval_schema_sql())?;
+            rebuild_retrieval_in_migration(&transaction)?;
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             transaction.commit()?;
             Ok(())
@@ -2136,13 +2722,17 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             add_session_settings(&transaction)?;
             add_notes_job_settings(&transaction)?;
             add_reliability_schema(&transaction)?;
+            transaction.execute_batch(retrieval_schema_sql())?;
+            rebuild_retrieval_in_migration(&transaction)?;
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             transaction.commit()?;
             Ok(())
         }
-        4 => {
+        4 | 5 => {
             let transaction = connection.unchecked_transaction()?;
             add_reliability_schema(&transaction)?;
+            transaction.execute_batch(retrieval_schema_sql())?;
+            rebuild_retrieval_in_migration(&transaction)?;
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             transaction.commit()?;
             Ok(())
@@ -2150,6 +2740,45 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         version if version == SCHEMA_VERSION as i64 => Ok(()),
         _ => Err(VaultError::CorruptDatabase),
     }
+}
+
+fn rebuild_retrieval_in_migration(transaction: &Transaction<'_>) -> Result<()> {
+    let mut statement = transaction.prepare(
+        "SELECT memory_records.id, memory_records.revision, memory_records.kind,
+                memory_records.content, memory_records.evidence_quote, source.created_at
+         FROM memory_records
+         JOIN messages AS source ON source.id = memory_records.source_message_id
+         WHERE memory_records.deleted = 0
+           AND source.role = 'user'
+           AND NOT EXISTS (
+               SELECT 1 FROM memory_exclusions
+               WHERE source_message_id = memory_records.source_message_id
+           )",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, revision, kind, content, quote, reported_at) = row?;
+        let kind = MemoryKind::from_db_value(&kind).ok_or(VaultError::CorruptDatabase)?;
+        index_memory_record(
+            transaction,
+            &id,
+            revision,
+            kind,
+            &content,
+            &quote,
+            &reported_at,
+        )?;
+    }
+    Ok(())
 }
 
 fn add_session_settings(transaction: &Transaction<'_>) -> Result<()> {
@@ -2195,12 +2824,14 @@ fn validate_schema(connection: &Connection) -> Result<()> {
             "SELECT count(*) FROM sqlite_master
              WHERE type = 'table' AND name IN
                  ('sessions', 'messages', 'notes_jobs', 'user_notes', 'memory_records',
-                  'memory_exclusions', 'provider_settings', 'reading_settings')",
+                  'memory_exclusions', 'provider_settings', 'reading_settings',
+                  'memory_fts', 'memory_embeddings', 'memory_view_memberships',
+                  'memory_report_times', 'memory_index_state')",
             [],
             |row| row.get(0),
         )
         .map_err(|_| VaultError::CorruptDatabase)?;
-    if table_count != 8 {
+    if table_count != 13 {
         return Err(VaultError::CorruptDatabase);
     }
     Ok(())
@@ -2447,6 +3078,7 @@ mod tests {
     use super::*;
     use crate::notes::{MemoryCandidate, MemoryEvidenceState, NoteCandidate};
     use std::fs;
+    use std::time::Instant;
 
     fn temp_vault_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("temporary test directory")
@@ -2666,6 +3298,325 @@ mod tests {
         }
     }
 
+    fn save_synthetic_memory(
+        vault: &mut Vault,
+        session_id: &str,
+        source: &str,
+        kind: MemoryKind,
+        content: &str,
+        quote: &str,
+    ) -> MemoryRecord {
+        let (_, assistant) = finish_synthetic_turn(vault, session_id, source);
+        vault.begin_notes(&assistant.id).expect("claim notes job");
+        vault
+            .apply_notes(
+                &assistant.id,
+                &NotePatch {
+                    memories: vec![MemoryCandidate {
+                        kind,
+                        content: content.to_owned(),
+                        evidence_quote: quote.to_owned(),
+                    }],
+                    notes: Vec::new(),
+                },
+            )
+            .expect("save memory");
+        vault
+            .list_memories()
+            .expect("list memories")
+            .into_iter()
+            .find(|memory| memory.assistant_message_id == assistant.id)
+            .expect("created memory")
+    }
+
+    #[test]
+    fn query_retrieval_finds_old_relevant_memory_and_abstains_without_a_match() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let old = save_synthetic_memory(
+            &mut vault,
+            &session.id,
+            "I keep a small ceramic fox from my grandfather on my desk.",
+            MemoryKind::Preference,
+            "Keeps a ceramic fox from their grandfather on the desk",
+            "ceramic fox",
+        );
+        for index in 0..8 {
+            let source = format!("Synthetic recent preference {index}: I like tea number {index}.");
+            let quote = format!("tea number {index}");
+            let content = format!("Likes synthetic tea number {index}");
+            save_synthetic_memory(
+                &mut vault,
+                &session.id,
+                &source,
+                MemoryKind::Preference,
+                &content,
+                &quote,
+            );
+        }
+
+        let result = vault
+            .retrieve_memory_context(
+                "What was the keepsake from my grandfather?",
+                &RetrievalOptions::lexical(1_000, 4),
+            )
+            .expect("retrieve old memory");
+        assert_eq!(result.matches[0].memory_id, old.id);
+        assert!(result.context.contains("ceramic fox"));
+
+        let no_result = vault
+            .retrieve_memory_context(
+                "unmentioned observatory telescope",
+                &RetrievalOptions::lexical(1_000, 4),
+            )
+            .expect("retrieve absent memory");
+        assert!(no_result.matches.is_empty());
+        assert!(no_result.context.is_empty());
+    }
+
+    #[test]
+    fn hybrid_ranking_disambiguates_same_name_and_respects_context_budget() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let first = save_synthetic_memory(
+            &mut vault,
+            &session.id,
+            "Mira Shah is my neighbor who grows tomatoes.",
+            MemoryKind::Person,
+            "Mira Shah is a neighbor who grows tomatoes",
+            "Mira Shah",
+        );
+        let second = save_synthetic_memory(
+            &mut vault,
+            &session.id,
+            "Mira Chen is my coworker on the Atlas project.",
+            MemoryKind::Person,
+            "Mira Chen is a coworker on the Atlas project",
+            "Mira Chen",
+        );
+        vault
+            .store_memory_embedding(
+                &first.id,
+                first.revision,
+                &QueryEmbedding {
+                    model: "synthetic-embed".into(),
+                    vector: vec![1.0, 0.0],
+                },
+            )
+            .expect("store first embedding");
+        vault
+            .store_memory_embedding(
+                &second.id,
+                second.revision,
+                &QueryEmbedding {
+                    model: "synthetic-embed".into(),
+                    vector: vec![0.0, 1.0],
+                },
+            )
+            .expect("store second embedding");
+
+        let result = vault
+            .retrieve_memory_context(
+                "Mira project",
+                &RetrievalOptions {
+                    max_bytes: 1_000,
+                    max_records: 2,
+                    query_embedding: Some(QueryEmbedding {
+                        model: "synthetic-embed".into(),
+                        vector: vec![0.0, 1.0],
+                    }),
+                },
+            )
+            .expect("hybrid retrieval");
+        assert_eq!(result.matches[0].memory_id, second.id);
+        assert_eq!(result.matches[0].semantic_rank, Some(1));
+
+        let too_small = vault
+            .retrieve_memory_context("Mira", &RetrievalOptions::lexical(24, 2))
+            .expect("bounded retrieval");
+        assert!(too_small.context.is_empty());
+        assert!(too_small.matches.is_empty());
+        assert!(too_small.omitted_count >= 2);
+    }
+
+    #[test]
+    fn correction_forgetting_and_late_embedding_commit_cannot_restore_stale_memory() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let original = save_synthetic_memory(
+            &mut vault,
+            &session.id,
+            "Mira is my sister.",
+            MemoryKind::Person,
+            "Mira is the user's sister",
+            "Mira is my sister",
+        );
+        let stale_embedding = QueryEmbedding {
+            model: "synthetic-embed".into(),
+            vector: vec![1.0, 0.0],
+        };
+        let corrected = vault
+            .edit_memory(
+                &original.id,
+                "Mira is my coworker, not my sister",
+                original.revision,
+            )
+            .expect("correct memory");
+        assert!(matches!(
+            vault.store_memory_embedding(&original.id, original.revision, &stale_embedding),
+            Err(VaultError::MemoryRevisionConflict)
+        ));
+        let result = vault
+            .retrieve_memory_context("Mira sister coworker", &RetrievalOptions::lexical(1_000, 3))
+            .expect("retrieve correction");
+        assert!(result.context.contains("coworker, not my sister"));
+        assert_eq!(result.matches[0].revision, corrected.revision);
+
+        vault
+            .delete_memory(&corrected.id, corrected.revision)
+            .expect("forget corrected memory");
+        assert!(vault
+            .retrieve_memory_context("Mira", &RetrievalOptions::lexical(1_000, 3))
+            .expect("retrieve after forget")
+            .matches
+            .is_empty());
+        assert!(matches!(
+            vault.store_memory_embedding(&corrected.id, corrected.revision, &stale_embedding),
+            Err(VaultError::MemoryRevisionConflict)
+        ));
+        let status = vault.memory_index_status().expect("index status");
+        assert_eq!(status.eligible_records, 0);
+        assert_eq!(status.lexical_indexed, 0);
+    }
+
+    #[test]
+    fn memory_off_turns_are_never_backfilled_by_rebuild() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let disabled = vault
+            .update_session(&session.id, &session.title, false, true, session.revision)
+            .expect("disable memory");
+        let (_, assistant) = finish_synthetic_turn(
+            &mut vault,
+            &session.id,
+            "My private synthetic code word is cobalt-lantern.",
+        );
+        let input = vault
+            .begin_notes(&assistant.id)
+            .expect("claim disabled job");
+        assert!(!input.memory_enabled);
+        vault
+            .apply_notes(
+                &assistant.id,
+                &NotePatch {
+                    memories: vec![MemoryCandidate {
+                        kind: MemoryKind::Preference,
+                        content: "Uses the code word cobalt-lantern".into(),
+                        evidence_quote: "cobalt-lantern".into(),
+                    }],
+                    notes: Vec::new(),
+                },
+            )
+            .expect("complete disabled job without memory write");
+        vault
+            .update_session(&session.id, &disabled.title, true, true, disabled.revision)
+            .expect("re-enable memory");
+        vault.rebuild_memory_index().expect("rebuild index");
+        let result = vault
+            .retrieve_memory_context("cobalt lantern", &RetrievalOptions::lexical(1_000, 3))
+            .expect("retrieve disabled source");
+        assert!(result.matches.is_empty());
+        assert_eq!(
+            vault
+                .memory_index_status()
+                .expect("status")
+                .eligible_records,
+            0
+        );
+    }
+
+    #[test]
+    #[ignore = "manual representative-scale benchmark; run with --ignored --nocapture"]
+    fn retrieval_benchmark_at_1k_10k_and_100k_records() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let (source, assistant) = finish_synthetic_turn(
+            &mut vault,
+            &session.id,
+            "Synthetic benchmark source with no personal history.",
+        );
+        let timestamp = now_rfc3339();
+        let mut inserted = 0_usize;
+        for target in [1_000_usize, 10_000, 100_000] {
+            let transaction = vault.connection.transaction().expect("transaction");
+            for index in inserted..target {
+                let id = Uuid::new_v4().to_string();
+                let content = if index + 1 == target {
+                    format!("Synthetic raremarker{target} benchmark record")
+                } else {
+                    format!("Synthetic ordinary benchmark record {index}")
+                };
+                transaction
+                    .execute(
+                        "INSERT INTO memory_records
+                         (id, session_id, source_message_id, assistant_message_id,
+                          kind, content, evidence_quote, evidence_state, revision,
+                          edited, deleted, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, 'preference', ?5, 'Synthetic benchmark source',
+                                 'user_reported', 1, 0, 0, ?6, ?6)",
+                        params![id, session.id, source.id, assistant.id, content, timestamp],
+                    )
+                    .expect("insert benchmark memory");
+                index_memory_record(
+                    &transaction,
+                    &id,
+                    1,
+                    MemoryKind::Preference,
+                    &content,
+                    "Synthetic benchmark source",
+                    &source.created_at,
+                )
+                .expect("index benchmark memory");
+            }
+            transaction.commit().expect("commit benchmark records");
+            inserted = target;
+
+            let query = format!("raremarker{target}");
+            let mut durations = Vec::new();
+            for _ in 0..20 {
+                let start = Instant::now();
+                let result = vault
+                    .retrieve_memory_context(&query, &RetrievalOptions::lexical(1_000, 4))
+                    .expect("benchmark retrieval");
+                assert_eq!(result.matches.len(), 1);
+                durations.push(start.elapsed());
+            }
+            durations.sort();
+            eprintln!(
+                "retrieval_benchmark records={target} warm_p50_us={} warm_p95_us={} vault_files_bytes={}",
+                durations[10].as_micros(),
+                durations[19].as_micros(),
+                ["", "-wal", "-shm"]
+                    .into_iter()
+                    .filter_map(|suffix| {
+                        fs::metadata(PathBuf::from(format!(
+                            "{}{}",
+                            directory.path().join(DATABASE_FILE_NAME).display(),
+                            suffix
+                        )))
+                        .ok()
+                        .map(|metadata| metadata.len())
+                    })
+                    .sum::<u64>(),
+            );
+        }
+    }
+
     #[test]
     fn migrates_a_schema_one_vault_without_losing_messages() {
         let directory = temp_vault_dir();
@@ -2677,7 +3628,12 @@ mod tests {
         vault
             .connection
             .execute_batch(
-                "DROP TABLE memory_records;
+                "DROP TABLE memory_fts;
+                 DROP TABLE memory_embeddings;
+                 DROP TABLE memory_view_memberships;
+                 DROP TABLE memory_report_times;
+                 DROP TABLE memory_index_state;
+                 DROP TABLE memory_records;
                  DROP TABLE memory_exclusions;
                  DROP TABLE user_notes;
                  DROP TABLE notes_jobs;
@@ -2697,7 +3653,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, SCHEMA_VERSION as i64);
+        assert_eq!(version, i64::from(SCHEMA_VERSION));
         assert!(migrated.list_notes().expect("notes").is_empty());
     }
 
@@ -2714,7 +3670,12 @@ mod tests {
         vault
             .connection
             .execute_batch(
-                "DROP TABLE memory_exclusions;
+                "DROP TABLE memory_fts;
+                 DROP TABLE memory_embeddings;
+                 DROP TABLE memory_view_memberships;
+                 DROP TABLE memory_report_times;
+                 DROP TABLE memory_index_state;
+                 DROP TABLE memory_exclusions;
                  DROP TABLE memory_records;
                  ALTER TABLE notes_jobs DROP COLUMN notes_enabled;
                  ALTER TABLE notes_jobs DROP COLUMN memory_enabled;
@@ -2793,7 +3754,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, SCHEMA_VERSION as i64);
+        assert_eq!(version, i64::from(SCHEMA_VERSION));
     }
 
     #[test]
@@ -2809,7 +3770,12 @@ mod tests {
         vault
             .connection
             .execute_batch(
-                "DROP TABLE memory_records;
+                "DROP TABLE memory_fts;
+                 DROP TABLE memory_embeddings;
+                 DROP TABLE memory_view_memberships;
+                 DROP TABLE memory_report_times;
+                 DROP TABLE memory_index_state;
+                 DROP TABLE memory_records;
                  DROP TABLE memory_exclusions;
                  DROP TABLE user_notes;
                  DROP TABLE notes_jobs;
@@ -2866,7 +3832,12 @@ mod tests {
         vault
             .connection
             .execute_batch(
-                "ALTER TABLE notes_jobs DROP COLUMN notes_enabled;
+                "DROP TABLE memory_fts;
+                 DROP TABLE memory_embeddings;
+                 DROP TABLE memory_view_memberships;
+                 DROP TABLE memory_report_times;
+                 DROP TABLE memory_index_state;
+                 ALTER TABLE notes_jobs DROP COLUMN notes_enabled;
                  ALTER TABLE notes_jobs DROP COLUMN memory_enabled;
                  ALTER TABLE sessions DROP COLUMN notes_enabled;
                  ALTER TABLE sessions DROP COLUMN memory_enabled;
@@ -2903,7 +3874,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, SCHEMA_VERSION as i64);
+        assert_eq!(version, i64::from(SCHEMA_VERSION));
     }
 
     #[test]

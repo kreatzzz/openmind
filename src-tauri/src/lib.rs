@@ -6,6 +6,7 @@ pub mod notes;
 pub mod provider;
 pub mod scheduler;
 pub mod remote;
+pub mod retrieval;
 pub mod vault;
 
 #[cfg(feature = "desktop")]

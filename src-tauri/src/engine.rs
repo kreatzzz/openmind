@@ -7,6 +7,10 @@ use crate::{
     app_settings::{LineWidth, NoteJob, ProviderSettings, ReadingSettings},
     models::{Message, MessageRole, MessageStatus, Session},
     notes::{MemoryRecord, NotePatch, NotesInput, UserNote},
+    retrieval::{
+        embed_local_ollama, embed_local_ollama_after_verification, verify_local_ollama_model,
+        MemoryIndexStatus, RetrievalOptions, RetrievalResult,
+    },
     vault::Vault,
 };
 
@@ -609,6 +613,108 @@ impl Engine {
             .ok_or("Unlock your vault first.")?
             .list_memories()
             .map_err(|error| error.to_string())
+    }
+
+    pub fn retrieve_memory_context(
+        &self,
+        query: &str,
+        options: &RetrievalOptions,
+    ) -> Result<RetrievalResult, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .retrieve_memory_context(query, options)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn memory_index_status(&self) -> Result<MemoryIndexStatus, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .memory_index_status()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn rebuild_memory_index(&self) -> Result<MemoryIndexStatus, String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop the current operation before rebuilding memory search.".into());
+        }
+        state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .rebuild_memory_index()
+            .map_err(|error| error.to_string())
+    }
+
+    /// Opt-in hybrid retrieval. The query is sent only to the caller-selected
+    /// loopback Ollama endpoint; lexical retrieval remains available without it.
+    pub async fn retrieve_memory_context_with_local_embedding(
+        &self,
+        base_url: &str,
+        model: &str,
+        query: &str,
+        max_bytes: usize,
+        max_records: usize,
+        cancel: &CancellationToken,
+    ) -> Result<RetrievalResult, String> {
+        let embedding = embed_local_ollama(base_url, model, query, cancel)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.retrieve_memory_context(
+            query,
+            &RetrievalOptions {
+                max_bytes,
+                max_records,
+                query_embedding: Some(embedding),
+            },
+        )
+    }
+
+    /// Build a bounded batch of record embeddings. Calls never select or
+    /// download a model, and every commit rechecks the memory revision.
+    pub async fn rebuild_local_memory_embeddings(
+        &self,
+        base_url: &str,
+        model: &str,
+        cancel: &CancellationToken,
+    ) -> Result<MemoryIndexStatus, String> {
+        const MAX_BATCH: usize = 256;
+        verify_local_ollama_model(base_url, model)
+            .await
+            .map_err(|error| error.to_string())?;
+        let sources = {
+            let state = self.state()?;
+            if state.active.is_some() || state.notes_active.is_some() {
+                return Err("Stop the current operation before rebuilding memory search.".into());
+            }
+            state
+                .vault
+                .as_ref()
+                .ok_or("Unlock your vault first.")?
+                .pending_embedding_sources(model, MAX_BATCH)
+                .map_err(|error| error.to_string())?
+        };
+        for source in sources {
+            let embedding =
+                embed_local_ollama_after_verification(base_url, model, &source.content, cancel)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            let mut state = self.state()?;
+            if state.active.is_some() || state.notes_active.is_some() {
+                return Err("Memory search rebuild was interrupted by active work.".into());
+            }
+            state
+                .vault
+                .as_mut()
+                .ok_or("The vault was locked during memory search rebuild.")?
+                .store_memory_embedding(&source.memory_id, source.revision, &embedding)
+                .map_err(|error| error.to_string())?;
+        }
+        self.memory_index_status()
     }
 
     pub fn notes_permissions(&self, message_id: &str) -> Result<(bool, bool), String> {
