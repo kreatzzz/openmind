@@ -85,6 +85,18 @@ Per-case expected ranks were:
 
 One of two unknown questions returned semantic candidates, so live hybrid abstention was 1/2. The present cosine threshold of 0.35 did not improve recall on this fixture and produced one false positive. This model and threshold should not be enabled by default based on these results. A larger held-out set should tune thresholds per model fingerprint and include irrelevant-selected-record judgment, rather than lowering the threshold to recover these two misses.
 
+## Fresh lexical scale measurement
+
+A separate ignored benchmark inserted cumulative synthetic short records into one encrypted SQLCipher vault and ran 20 warm exact unique-term FTS queries at each size in a debug build. Vault size combines the database, WAL, and shared-memory files while open.
+
+| Records | Warm p50 | Warm p95 | Vault files |
+| ---: | ---: | ---: | ---: |
+| 1,000 | 97 µs | 372 µs | 1,325,544 bytes |
+| 10,000 | 93 µs | 440 µs | 21,132,280 bytes |
+| 100,000 | 106 µs | 966 µs | 205,335,560 bytes |
+
+The benchmark completed in 26.67 seconds on the Windows machine described above. It measures warm lexical lookup and encrypted file growth. It does not measure cold startup, RAM, semantic-vector scan or query-embedding latency, natural-language relevance, or macOS behavior.
+
 ## Live extraction observations
 
 The first four fixed synthetic messages exposed a category-selection failure: every candidate passed exact-substring evidence validation, but `qwen3.5:4b` produced zero internal memories and mislabeled factual or hypothetical statements as notebook questions and next steps. A concise extraction-policy revision then defined durable memory kinds separately from notebook artifacts, required negation and corrections to be preserved, and excluded hypotheticals, sarcasm, and quoted commands as user facts. JSON-schema fields carry the same category descriptions.
@@ -108,7 +120,9 @@ This six-message observation is too small to calculate a useful extraction accur
 
 An Engine-level synthetic test now creates two completed turns and atomically applies their memory/notebook patches, corrects and forgets one source, creates a private session, exports an encrypted backup, restores it into a new Engine, then locks and reopens it. The retained memory and note survive. The forgotten source remains absent from lexical retrieval and derived notes after restore and reopen. The private session never appears in the restored session list. The backup file contains no plaintext copy of the forgotten synthetic source.
 
-The opt-in OpenAI-compatible loopback smoke used only `http://127.0.0.1:11434/v1` with a dummy key and `qwen3.5:4b`. Streaming generation succeeded with the exact `LOOPBACK_OK` marker. Structured extraction returned `MalformedResponse` in two runs. This is a release gap in the Ollama OpenAI-compatible extraction path; the test remains ignored by default and intentionally fails when explicitly run until the adapter/provider combination returns the required strict patch.
+After the extraction-policy change was integrated, the unchanged native local-memory end-to-end test passed in 7.82 seconds. It exercised the real `qwen3.5:4b` reply, extraction, persistence, lock/reopen, and retrieval path for the lighthouse-marathon source that previously produced zero memories.
+
+The opt-in OpenAI-compatible loopback smoke used only `http://127.0.0.1:11434/v1` with a dummy key and `qwen3.5:4b`. Streaming generation succeeded with the exact `LOOPBACK_OK` marker. Structured extraction returned `MalformedResponse` in two default-sampling runs. Inspection of the synthetic wire response showed the expected OpenAI choice/message envelope, but model content varied and did not reliably satisfy the strict patch plus exact-evidence validator. An experiment adding the standard `temperature: 0` field returned one valid preference memory and made the smoke pass, but that field was not added to the generic adapter because some otherwise compatible reasoning endpoints reject non-default sampling parameters. Strict rejection remains the safe behavior. The test stays ignored by default and records this provider-configuration compatibility gap.
 
 ## Limits and next evaluation
 
@@ -117,5 +131,5 @@ The opt-in OpenAI-compatible loopback smoke used only `http://127.0.0.1:11434/v1
 - Boundary escaping prevents markup breakout. Retrieved instructions remain untrusted data and can still influence a model; response-level prompt-injection behavior was not evaluated here.
 - The embedding endpoint's 6,000-byte input allowance can exceed the installed model's 512-token context on long records. Ordinary short fixture records passed, but truncation and long multilingual inputs remain unmeasured.
 - Correction and forgetting are tested for the implemented source-backed record and both search channels. Topic-wide forgetting, relationship repair, and multi-source dependency closure are not implemented.
-- The suite does not measure 1k/10k/100k performance; the existing ignored scale benchmark remains the appropriate separate tool.
+- The scale measurement covers warm exact-term FTS only; it is not evidence about semantic relevance or end-to-end response latency.
 - A release candidate should add at least 100 held-out annotated continuity questions, 200 human-reviewed extraction candidates, per-model threshold calibration, and response-level checks for temporal conflict, adversarial retrieved text, sarcasm, hypotheticals, and unsupported abstention.

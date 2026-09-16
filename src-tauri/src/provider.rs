@@ -691,7 +691,7 @@ async fn execute_with_cancel(
     }
 }
 
-async fn read_response_body(
+pub(crate) async fn read_response_body(
     mut response: Response,
     max_bytes: usize,
     cancel: Option<&CancellationToken>,
