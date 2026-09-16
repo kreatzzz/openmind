@@ -42,7 +42,21 @@
     "allow-list-memories",
     "allow-edit-memory",
     "allow-delete-memory",
+    "allow-get-memory-index-status",
+    "allow-get-memory-embedding-configuration",
+    "allow-rebuild-memory-index",
+    "allow-clear-memory-embedding-configuration",
     "allow-retry-notes",
-    "allow-delete-session"
+    "allow-delete-session",
+    "allow-create-private-session",
+    "allow-export-vault-backup",
+    "allow-restore-vault-backup",
+    "allow-change-vault-passphrase",
+    "allow-get-lifecycle-settings",
+    "allow-update-lifecycle-settings",
+    "allow-record-activity",
+    "allow-check-idle-lock",
+    "allow-prune-retention",
+    "allow-reset-vault"
   ]
 }

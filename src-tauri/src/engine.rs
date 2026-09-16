@@ -120,6 +120,11 @@ struct ActiveNotes {
     cancel: CancellationToken,
 }
 
+struct ActiveMemoryWork {
+    id: String,
+    cancel: CancellationToken,
+}
+
 pub struct PreparedNotes {
     pub attempt_id: String,
     pub input: NotesInput,
@@ -141,6 +146,7 @@ struct State {
     vault: Option<Vault>,
     active: Option<ActiveTurn>,
     notes_active: Option<ActiveNotes>,
+    memory_work: Option<ActiveMemoryWork>,
     is_demo: bool,
     vault_epoch: u64,
     private_sessions: HashMap<String, PrivateSession>,
@@ -153,6 +159,7 @@ impl Default for State {
             vault: None,
             active: None,
             notes_active: None,
+            memory_work: None,
             is_demo: false,
             private_sessions: HashMap::new(),
             last_activity: Instant::now(),
@@ -196,6 +203,19 @@ pub struct PreparedTurn {
     pub history: Vec<Message>,
     pub memory: String,
     pub cancel: CancellationToken,
+}
+
+/// Retrieved context plus the vault/session revisions that authorized it.
+/// `prepare_turn_with_memory` validates these fields while holding the engine
+/// lock so a correction, deletion, permission change, or vault lock can never
+/// dispatch stale remembered context.
+pub struct TurnMemoryContext {
+    session_id: String,
+    context: String,
+    vault_epoch: u64,
+    session_revision: Option<i64>,
+    retrieval_epoch: Option<i64>,
+    private: bool,
 }
 
 impl Engine {
@@ -359,6 +379,9 @@ impl Engine {
 
     pub fn lock(&self) -> Result<(), String> {
         let mut state = self.state()?;
+        if let Some(work) = state.memory_work.take() {
+            work.cancel.cancel();
+        }
         if let Some(active) = state.active.take() {
             active.cancel.cancel();
             if let Some(vault) = state.vault.as_mut() {
@@ -616,6 +639,18 @@ impl Engine {
         provider: ProviderKind,
         remote_consent: bool,
     ) -> Result<PreparedTurn, String> {
+        let memory = self.retrieve_turn_memory_lexical(session_id, content)?;
+        self.prepare_turn_with_memory(session_id, content, provider, remote_consent, memory)
+    }
+
+    pub fn prepare_turn_with_memory(
+        &self,
+        session_id: &str,
+        content: &str,
+        provider: ProviderKind,
+        remote_consent: bool,
+        memory: TurnMemoryContext,
+    ) -> Result<PreparedTurn, String> {
         let mut state = self.state()?;
         let settings = state
             .vault
@@ -645,7 +680,17 @@ impl Engine {
         if state.vault.is_none() {
             return Err("Unlock your vault first.".into());
         }
+        let current_vault_epoch = state.vault_epoch;
         if let Some(private) = state.private_sessions.get_mut(session_id) {
+            if memory.session_id != session_id
+                || !memory.private
+                || !memory.context.is_empty()
+                || memory.vault_epoch != current_vault_epoch
+            {
+                return Err(
+                    "Conversation state changed while retrieving remembered context.".into(),
+                );
+            }
             let history = recent_context(private.messages.clone(), 6_000);
             let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
             let user = Message {
@@ -688,17 +733,28 @@ impl Engine {
         let session = vault
             .get_session(session_id)
             .map_err(|error| error.to_string())?;
+        if memory.session_id != session_id
+            || memory.private
+            || memory.vault_epoch != current_vault_epoch
+            || memory.session_revision != Some(session.revision)
+            || memory.retrieval_epoch
+                != Some(vault.retrieval_epoch().map_err(|error| error.to_string())?)
+        {
+            return Err(
+                "Remembered context changed before the reply started. Try sending again.".into(),
+            );
+        }
         let mut history = vault
             .list_context_messages(session_id)
             .map_err(|error| error.to_string())?;
         // Check the session branch before touching the global memory bundle;
         // an off conversation must never retrieve saved context.
         let memory = if session.memory_enabled {
-            vault
-                .memory_context(1_000)
-                .map_err(|error| error.to_string())?
-        } else {
+            memory.context
+        } else if memory.context.is_empty() {
             String::new()
+        } else {
+            return Err("Memory permission changed before the reply started.".into());
         };
         let (user, assistant) = vault
             .begin_turn(session_id, content)
@@ -878,6 +934,162 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
+    fn retrieve_turn_memory_lexical(
+        &self,
+        session_id: &str,
+        query: &str,
+    ) -> Result<TurnMemoryContext, String> {
+        if query.trim().is_empty() || query.len() > 6_000 {
+            return Err("Write a message of up to 6,000 UTF-8 bytes before sending.".into());
+        }
+        let state = self.state()?;
+        if state.private_sessions.contains_key(session_id) {
+            return Ok(TurnMemoryContext {
+                session_id: session_id.into(),
+                context: String::new(),
+                vault_epoch: state.vault_epoch,
+                session_revision: None,
+                retrieval_epoch: None,
+                private: true,
+            });
+        }
+        let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
+        let session = vault
+            .get_session(session_id)
+            .map_err(|error| error.to_string())?;
+        let retrieval_epoch = vault.retrieval_epoch().map_err(|error| error.to_string())?;
+        let context = if session.memory_enabled {
+            vault
+                .retrieve_memory_context(
+                    query,
+                    &ContextBudget::conservative_fallback(1_200, 8).retrieval_options(None),
+                )
+                .map_err(|error| error.to_string())?
+                .context
+        } else {
+            String::new()
+        };
+        Ok(TurnMemoryContext {
+            session_id: session_id.into(),
+            context,
+            vault_epoch: state.vault_epoch,
+            session_revision: Some(session.revision),
+            retrieval_epoch: Some(retrieval_epoch),
+            private: false,
+        })
+    }
+
+    /// Query-aware retrieval used by the real send path. Private and
+    /// memory-disabled conversations return before any embedding request.
+    pub async fn retrieve_turn_memory(
+        &self,
+        session_id: &str,
+        query: &str,
+    ) -> Result<TurnMemoryContext, String> {
+        if query.trim().is_empty() || query.len() > 6_000 {
+            return Err("Write a message of up to 6,000 UTF-8 bytes before sending.".into());
+        }
+        let work_id = uuid::Uuid::new_v4().to_string();
+        let cancel = CancellationToken::new();
+        let snapshot = {
+            let mut state = self.state()?;
+            if state.private_sessions.contains_key(session_id) {
+                return Ok(TurnMemoryContext {
+                    session_id: session_id.into(),
+                    context: String::new(),
+                    vault_epoch: state.vault_epoch,
+                    session_revision: None,
+                    retrieval_epoch: None,
+                    private: true,
+                });
+            }
+            if state.active.is_some() || state.memory_work.is_some() {
+                return Err("Wait for the current operation to finish, or stop it first.".into());
+            }
+            if let Some(notes) = state.notes_active.take() {
+                notes.cancel.cancel();
+                state
+                    .vault
+                    .as_mut()
+                    .ok_or("Unlock your vault first.")?
+                    .defer_notes(&notes.message_id)
+                    .map_err(|error| error.to_string())?;
+            }
+            let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
+            let session = vault
+                .get_session(session_id)
+                .map_err(|error| error.to_string())?;
+            let retrieval_epoch = vault.retrieval_epoch().map_err(|error| error.to_string())?;
+            let configuration = vault
+                .memory_embedding_configuration()
+                .map_err(|error| error.to_string())?;
+            if !session.memory_enabled || configuration.is_none() {
+                drop(state);
+                return self.retrieve_turn_memory_lexical(session_id, query);
+            }
+            let snapshot = (
+                state.vault_epoch,
+                session.revision,
+                retrieval_epoch,
+                configuration.expect("configuration checked"),
+            );
+            state.memory_work = Some(ActiveMemoryWork {
+                id: work_id.clone(),
+                cancel: cancel.clone(),
+            });
+            snapshot
+        };
+
+        let embedding =
+            embed_local_ollama(&snapshot.3.base_url, &snapshot.3.model, query, &cancel).await;
+        let mut state = self.state()?;
+        let matching_work = state
+            .memory_work
+            .as_ref()
+            .is_some_and(|work| work.id == work_id);
+        if matching_work {
+            state.memory_work = None;
+        }
+        let embedding = embedding.map_err(|error| error.to_string())?;
+        if !matching_work || cancel.is_cancelled() || state.vault_epoch != snapshot.0 {
+            return Err("Remembered context retrieval was stopped.".into());
+        }
+        let vault = state
+            .vault
+            .as_ref()
+            .ok_or("The vault was locked while retrieving remembered context.")?;
+        let session = vault
+            .get_session(session_id)
+            .map_err(|error| error.to_string())?;
+        if !session.memory_enabled || session.revision != snapshot.1 {
+            return Err("Memory permission changed while retrieving remembered context.".into());
+        }
+        if vault.retrieval_epoch().map_err(|error| error.to_string())? != snapshot.2
+            || vault
+                .memory_embedding_configuration()
+                .map_err(|error| error.to_string())?
+                .as_ref()
+                != Some(&snapshot.3)
+        {
+            return Err("Remembered context changed while retrieval was running.".into());
+        }
+        let context = vault
+            .retrieve_memory_context(
+                query,
+                &ContextBudget::conservative_fallback(1_200, 8).retrieval_options(Some(embedding)),
+            )
+            .map_err(|error| error.to_string())?
+            .context;
+        Ok(TurnMemoryContext {
+            session_id: session_id.into(),
+            context,
+            vault_epoch: snapshot.0,
+            session_revision: Some(snapshot.1),
+            retrieval_epoch: Some(snapshot.2),
+            private: false,
+        })
+    }
+
     /// Retrieve for one durable session. Permission and vault identity are
     /// checked before any local model call and again before context dispatch.
     pub async fn retrieve_configured_memory_context(
@@ -1022,6 +1234,10 @@ impl Engine {
         const MAX_BATCH: usize = 32;
         let (vault_epoch, configuration, sources) = {
             let state = self.state()?;
+            if state.active.is_some() || state.notes_active.is_some() || state.memory_work.is_some()
+            {
+                return Err("Memory search maintenance waits until Openmind is idle.".into());
+            }
             let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
             let Some(configuration) = vault
                 .memory_embedding_configuration()
@@ -1051,6 +1267,10 @@ impl Engine {
             let mut state = self.state()?;
             if state.vault_epoch != vault_epoch {
                 return Err("The vault changed during memory search update.".into());
+            }
+            if state.active.is_some() || state.notes_active.is_some() || state.memory_work.is_some()
+            {
+                return Err("Memory search maintenance was interrupted by active work.".into());
             }
             state
                 .vault
@@ -1211,6 +1431,9 @@ impl Engine {
             active.cancel.cancel();
         }
         if let Some(active) = &state.notes_active {
+            active.cancel.cancel();
+        }
+        if let Some(active) = &state.memory_work {
             active.cancel.cancel();
         }
         Ok(())
@@ -1713,6 +1936,66 @@ mod tests {
             .expect("disabled retrieval");
         assert!(result.context.is_empty());
         assert!(result.matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn turn_retrieval_skips_private_and_memory_disabled_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+
+        let private = engine.create_private_session().unwrap();
+        let private_memory = engine
+            .retrieve_turn_memory(&private.id, "synthetic private query")
+            .await
+            .unwrap();
+        assert!(private_memory.private);
+        assert!(private_memory.context.is_empty());
+
+        let session = engine.create_session().unwrap();
+        let disabled = engine
+            .update_session(&session.id, &session.title, false, true, session.revision)
+            .unwrap();
+        let disabled_memory = engine
+            .retrieve_turn_memory(&disabled.id, "synthetic disabled query")
+            .await
+            .unwrap();
+        assert!(!disabled_memory.private);
+        assert!(disabled_memory.context.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_retrieval_is_rejected_before_transcript_or_context_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let memory = engine
+            .retrieve_turn_memory(&session.id, "synthetic query")
+            .await
+            .unwrap();
+
+        engine
+            .update_session(
+                &session.id,
+                &session.title,
+                false,
+                session.notes_enabled,
+                session.revision,
+            )
+            .unwrap();
+        let error = engine
+            .prepare_turn_with_memory(
+                &session.id,
+                "synthetic query",
+                ProviderKind::Ollama,
+                false,
+                memory,
+            )
+            .err()
+            .expect("stale retrieval must be rejected");
+        assert!(error.contains("Remembered context changed"));
+        assert!(engine.list_messages(&session.id).unwrap().is_empty());
     }
 
     #[test]

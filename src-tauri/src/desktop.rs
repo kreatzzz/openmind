@@ -23,6 +23,7 @@ use crate::{
     notes::{MemoryRecord, UserNote},
     provider::{self, ChatMessage, ModelInfo, ProviderError},
     remote,
+    retrieval::{EmbeddingConfiguration, MemoryIndexStatus},
 };
 
 struct DesktopState(Arc<Engine>);
@@ -108,6 +109,13 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| "The desktop operation was interrupted. Try again.".to_owned())?
 }
 
+fn schedule_memory_index_maintenance(engine: Arc<Engine>) {
+    tauri::async_runtime::spawn(async move {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _ = engine.update_configured_memory_embeddings(&cancel).await;
+    });
+}
+
 #[tauri::command]
 async fn get_vault_status(state: State<'_, DesktopState>) -> Result<VaultStatus, String> {
     blocking(&state, Engine::reconnect_renderer).await
@@ -168,10 +176,13 @@ async fn edit_memory(
     content: String,
     expected_revision: i64,
 ) -> Result<MemoryRecord, String> {
-    blocking(&state, move |engine| {
+    let engine = Arc::clone(&state.0);
+    let record = blocking(&state, move |engine| {
         engine.edit_memory(&id, &content, expected_revision)
     })
-    .await
+    .await?;
+    schedule_memory_index_maintenance(engine);
+    Ok(record)
 }
 
 #[tauri::command]
@@ -180,10 +191,47 @@ async fn delete_memory(
     id: String,
     expected_revision: i64,
 ) -> Result<(), String> {
+    let engine = Arc::clone(&state.0);
     blocking(&state, move |engine| {
         engine.delete_memory(&id, expected_revision)
     })
-    .await
+    .await?;
+    schedule_memory_index_maintenance(engine);
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_memory_index_status(
+    state: State<'_, DesktopState>,
+) -> Result<MemoryIndexStatus, String> {
+    blocking(&state, Engine::memory_index_status).await
+}
+
+#[tauri::command]
+async fn get_memory_embedding_configuration(
+    state: State<'_, DesktopState>,
+) -> Result<Option<EmbeddingConfiguration>, String> {
+    blocking(&state, Engine::memory_embedding_configuration).await
+}
+
+#[tauri::command]
+async fn rebuild_memory_index(
+    state: State<'_, DesktopState>,
+    base_url: String,
+    model: String,
+) -> Result<MemoryIndexStatus, String> {
+    let engine = Arc::clone(&state.0);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    engine
+        .rebuild_local_memory_embeddings(&base_url, &model, &cancel)
+        .await
+}
+
+#[tauri::command]
+async fn clear_memory_embedding_configuration(
+    state: State<'_, DesktopState>,
+) -> Result<MemoryIndexStatus, String> {
+    blocking(&state, Engine::clear_memory_embedding_configuration).await
 }
 
 async fn update_notes(
@@ -288,8 +336,10 @@ async fn execute_notes(
         },
     };
     let message = result.as_ref().err().map(|error| error.to_string());
+    let mut updated_memory = false;
     match engine.finish_notes(&prepared.attempt_id, result.as_ref().ok()) {
         Ok(Some(status)) => {
+            updated_memory = status == NotesStatus::Complete && prepared.input.memory_enabled;
             let message = if status == NotesStatus::Failed {
                 Some(message.unwrap_or_else(|| "Notes update stopped. You can retry it.".into()))
             } else {
@@ -313,6 +363,9 @@ async fn execute_notes(
                 notes_enabled: Some(prepared.input.notes_enabled),
             });
         }
+    }
+    if updated_memory {
+        schedule_memory_index_maintenance(engine);
     }
     Ok(())
 }
@@ -703,8 +756,17 @@ async fn send_message(
         return Err("Provider settings changed. Refresh settings before sending.".into());
     }
     let engine = Arc::clone(&state.0);
+    let memory = engine.retrieve_turn_memory(&session_id, &content).await?;
+    let prepare_session_id = session_id.clone();
+    let prepare_content = content.clone();
     let prepared = blocking(&state, move |engine| {
-        engine.prepare_turn_with_provider(&session_id, &content, provider, remote_consent)
+        engine.prepare_turn_with_memory(
+            &prepare_session_id,
+            &prepare_content,
+            provider,
+            remote_consent,
+            memory,
+        )
     })
     .await?;
     let message_id = prepared.assistant.id.clone();
@@ -931,6 +993,10 @@ pub fn run() {
             list_memories,
             edit_memory,
             delete_memory,
+            get_memory_index_status,
+            get_memory_embedding_configuration,
+            rebuild_memory_index,
+            clear_memory_embedding_configuration,
             retry_notes,
             create_vault,
             unlock_vault,
