@@ -259,10 +259,19 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     if metadata.len() > MAX_BACKUP_BYTES {
         return Err("The backup is too large.".into());
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    File::open(path)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
+    let file = File::open(path).map_err(|_| "Could not read the backup data.")?;
+    read_limited(file, MAX_BACKUP_BYTES)
+}
+
+fn read_limited(reader: impl Read, limit: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|_| "Could not read the backup data.")?;
+    if bytes.len() as u64 > limit {
+        return Err("The backup is too large.".into());
+    }
     Ok(bytes)
 }
 
@@ -304,6 +313,16 @@ mod tests {
 
     const VAULT_PASSPHRASE: &str = "synthetic original passphrase";
     const BACKUP_PASSPHRASE: &str = "synthetic portable backup passphrase";
+
+    #[test]
+    fn bounded_reader_rejects_content_that_grows_past_limit() {
+        let error = read_limited(std::io::Cursor::new(b"12345"), 4).unwrap_err();
+        assert_eq!(error, "The backup is too large.");
+        assert_eq!(
+            read_limited(std::io::Cursor::new(b"1234"), 4).unwrap(),
+            b"1234"
+        );
+    }
 
     #[test]
     fn encrypted_backup_restores_and_rejects_wrong_password_and_corruption() {

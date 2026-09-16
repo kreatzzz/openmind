@@ -276,11 +276,12 @@ impl Engine {
     /// Called once when the renderer mounts; an old channel cannot be reattached.
     pub fn reconnect_renderer(&self) -> Result<VaultStatus, String> {
         let mut state = self.state()?;
+        // A renderer reload is a privacy boundary. Clear every transient
+        // conversation, including completed or otherwise idle sessions.
+        state.private_sessions.clear();
         if let Some(active) = state.active.take() {
             active.cancel.cancel();
-            if active.private {
-                state.private_sessions.clear();
-            } else {
+            if !active.private {
                 state
                     .vault
                     .as_mut()
@@ -1399,7 +1400,12 @@ impl Engine {
         }
         if let Err(error) = fs::rename(&staging, &self.directory) {
             if had_existing {
-                let _ = fs::rename(&rollback, &self.directory);
+                if let Err(rollback_error) = fs::rename(&rollback, &self.directory) {
+                    return Err(format!(
+                        "Could not install the restored vault: {error}. The original vault is preserved at {} but could not be returned to its normal location: {rollback_error}",
+                        rollback.display()
+                    ));
+                }
             }
             let _ = fs::remove_dir_all(&staging);
             return Err(format!("Could not install the restored vault: {error}"));
@@ -1424,11 +1430,35 @@ impl Engine {
             Err(error) => {
                 let failed =
                     parent.join(format!(".openmind-failed-restore-{}", uuid::Uuid::new_v4()));
-                let _ = fs::rename(&self.directory, &failed);
-                if had_existing {
-                    let _ = fs::rename(&rollback, &self.directory);
+                if let Err(move_error) = fs::rename(&self.directory, &failed) {
+                    let preserved = if had_existing {
+                        format!(
+                            " The original vault is preserved at {}.",
+                            rollback.display()
+                        )
+                    } else {
+                        String::new()
+                    };
+                    return Err(format!(
+                        "The restored vault failed final verification: {error}. It remains at {} because recovery could not move it aside: {move_error}.{preserved}",
+                        self.directory.display()
+                    ));
                 }
-                let _ = fs::remove_dir_all(failed);
+                if had_existing {
+                    if let Err(rollback_error) = fs::rename(&rollback, &self.directory) {
+                        return Err(format!(
+                            "The restored vault failed final verification: {error}. The original vault is preserved at {} and the failed restore is preserved at {}, but the original could not be returned to its normal location: {rollback_error}",
+                            rollback.display(),
+                            failed.display()
+                        ));
+                    }
+                    let _ = fs::remove_dir_all(&failed);
+                } else {
+                    return Err(format!(
+                        "The restored vault failed final verification: {error}. The recovered files are preserved at {}.",
+                        failed.display()
+                    ));
+                }
                 Err(format!(
                     "The restored vault failed final verification: {error}"
                 ))
@@ -1742,6 +1772,31 @@ mod tests {
         assert!(engine.list_sessions().unwrap().is_empty());
         assert!(engine.list_notes().unwrap().is_empty());
         assert!(engine.list_memories().unwrap().is_empty());
+    }
+
+    #[test]
+    fn renderer_reconnect_clears_completed_private_conversations() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let private = engine.create_private_session().unwrap();
+        let turn = engine
+            .prepare_turn(&private.id, "Synthetic transient input.")
+            .unwrap();
+        engine
+            .append_chunk(&turn.assistant.id, "Synthetic transient reply.")
+            .unwrap();
+        engine
+            .finish_turn_and_prepare_notes(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap();
+
+        assert!(engine.reconnect_renderer().unwrap().unlocked);
+        assert!(engine
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .all(|session| session.id != private.id));
+        assert!(engine.list_messages(&private.id).is_err());
     }
 
     #[test]

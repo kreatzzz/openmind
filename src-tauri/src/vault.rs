@@ -323,7 +323,7 @@ impl Vault {
         if version < SCHEMA_VERSION as i64 && !migration_backup.exists() {
             copy_file_durable(&database_path, &migration_backup)?;
         }
-        let connection = match open_connection(&database_path, &db_key, false) {
+        let mut connection = match open_connection(&database_path, &db_key, false) {
             Ok(connection) => connection,
             Err(first_error) if migration_backup.exists() => {
                 cleanup_sqlite_files(&database_path);
@@ -341,8 +341,19 @@ impl Vault {
                 return Err(error);
             }
         };
+        if let Err(first_error) = recover_interrupted(&connection) {
+            if !migration_backup.exists() {
+                return Err(first_error);
+            }
+            drop(connection);
+            cleanup_sqlite_files(&database_path);
+            fs::copy(&migration_backup, &database_path)?;
+            connection = open_connection(&database_path, &db_key, false)?;
+            recover_interrupted(&connection)?;
+        }
+        // Keep the encrypted pre-migration copy until every recovery write has
+        // succeeded, falling back to that known-good copy when needed.
         let _ = fs::remove_file(migration_backup);
-        recover_interrupted(&connection)?;
         let _ = fs::remove_file(previous_envelope_path);
 
         Ok(Self {
@@ -3456,7 +3467,10 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
             return Err(error.into());
         }
         let _ = sync_parent(Some(parent));
-        fs::remove_file(previous)?;
+        // The new envelope is already durably installed. Failure to remove the
+        // encrypted previous envelope must not report that the passphrase
+        // change failed; `Vault::open` also performs this cleanup.
+        let _ = fs::remove_file(previous);
         Ok(())
     })();
     if result.is_err() {
@@ -3596,6 +3610,40 @@ mod tests {
         let recovered = Vault::open(directory.path(), passphrase).unwrap();
         assert_eq!(recovered.list_messages(&session.id).unwrap().len(), 1);
         assert!(!directory.path().join(".vault.db.pre-migration").exists());
+    }
+
+    #[test]
+    fn recovery_failure_falls_back_before_removing_migration_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let passphrase = "synthetic recovery failure passphrase";
+        let mut vault = Vault::create(directory.path(), passphrase).unwrap();
+        let session = vault.create_session().unwrap();
+        vault
+            .begin_turn(&session.id, "Synthetic interrupted input.")
+            .unwrap();
+        vault
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let database = directory.path().join(DATABASE_FILE_NAME);
+        let migration_backup = directory.path().join(".vault.db.pre-migration");
+        fs::copy(&database, &migration_backup).unwrap();
+        vault
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER reject_recovery
+                 BEFORE UPDATE OF status ON messages
+                 BEGIN SELECT RAISE(ABORT, 'synthetic recovery failure'); END;",
+            )
+            .unwrap();
+        drop(vault);
+
+        let recovered = Vault::open(directory.path(), passphrase).unwrap();
+        assert_eq!(
+            recovered.list_messages(&session.id).unwrap()[1].status,
+            MessageStatus::Interrupted
+        );
+        assert!(!migration_backup.exists());
     }
 
     #[test]
