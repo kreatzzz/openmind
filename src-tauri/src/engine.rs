@@ -200,19 +200,47 @@ pub struct PreparedTurn {
 
 impl Engine {
     pub fn list_plans(&self) -> Result<Vec<crate::scheduler::SessionPlan>, String> {
-        self.state()?.vault.as_ref().ok_or("Unlock your workspace first.")?.list_plans().map_err(|error| error.to_string())
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your workspace first.")?
+            .list_plans()
+            .map_err(|error| error.to_string())
     }
 
-    pub fn create_plan(&self, input: crate::scheduler::PlanInput) -> Result<crate::scheduler::SessionPlan, String> {
-        self.state()?.vault.as_ref().ok_or("Unlock your workspace first.")?.create_plan(input).map_err(|error| error.to_string())
+    pub fn create_plan(
+        &self,
+        input: crate::scheduler::PlanInput,
+    ) -> Result<crate::scheduler::SessionPlan, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your workspace first.")?
+            .create_plan(input)
+            .map_err(|error| error.to_string())
     }
 
     pub fn remove_plan(&self, id: &str, revision: i64) -> Result<(), String> {
-        self.state()?.vault.as_ref().ok_or("Unlock your workspace first.")?.remove_plan(id, revision).map_err(|error| error.to_string())
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your workspace first.")?
+            .remove_plan(id, revision)
+            .map_err(|error| error.to_string())
     }
 
-    pub fn enable_plan(&self, id: &str, enabled: bool, revision: i64) -> Result<crate::scheduler::SessionPlan, String> {
-        self.state()?.vault.as_ref().ok_or("Unlock your workspace first.")?.enable_plan(id, enabled, revision).map_err(|error| error.to_string())
+    pub fn enable_plan(
+        &self,
+        id: &str,
+        enabled: bool,
+        revision: i64,
+    ) -> Result<crate::scheduler::SessionPlan, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your workspace first.")?
+            .enable_plan(id, enabled, revision)
+            .map_err(|error| error.to_string())
     }
 
     pub fn poll_plans(&self) -> Result<Vec<crate::scheduler::DuePlan>, String> {

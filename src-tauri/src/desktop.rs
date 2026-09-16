@@ -28,23 +28,43 @@ use crate::{
 struct DesktopState(Arc<Engine>);
 
 #[tauri::command]
-async fn list_plans(state: State<'_, DesktopState>) -> Result<Vec<crate::scheduler::SessionPlan>, String> {
+async fn list_plans(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<crate::scheduler::SessionPlan>, String> {
     blocking(&state, Engine::list_plans).await
 }
 
 #[tauri::command]
-async fn create_plan(state: State<'_, DesktopState>, input: crate::scheduler::PlanInput) -> Result<crate::scheduler::SessionPlan, String> {
+async fn create_plan(
+    state: State<'_, DesktopState>,
+    input: crate::scheduler::PlanInput,
+) -> Result<crate::scheduler::SessionPlan, String> {
     blocking(&state, move |engine| engine.create_plan(input)).await
 }
 
 #[tauri::command]
-async fn remove_plan(state: State<'_, DesktopState>, id: String, expected_revision: i64) -> Result<(), String> {
-    blocking(&state, move |engine| engine.remove_plan(&id, expected_revision)).await
+async fn remove_plan(
+    state: State<'_, DesktopState>,
+    id: String,
+    expected_revision: i64,
+) -> Result<(), String> {
+    blocking(&state, move |engine| {
+        engine.remove_plan(&id, expected_revision)
+    })
+    .await
 }
 
 #[tauri::command]
-async fn enable_plan(state: State<'_, DesktopState>, id: String, enabled: bool, expected_revision: i64) -> Result<crate::scheduler::SessionPlan, String> {
-    blocking(&state, move |engine| engine.enable_plan(&id, enabled, expected_revision)).await
+async fn enable_plan(
+    state: State<'_, DesktopState>,
+    id: String,
+    enabled: bool,
+    expected_revision: i64,
+) -> Result<crate::scheduler::SessionPlan, String> {
+    blocking(&state, move |engine| {
+        engine.enable_plan(&id, enabled, expected_revision)
+    })
+    .await
 }
 
 struct Connection {
@@ -871,10 +891,19 @@ pub fn run() {
                 loop {
                     timer.tick().await;
                     let engine = Arc::clone(&engine);
-                    if let Ok(Ok(due)) = tauri::async_runtime::spawn_blocking(move || engine.poll_plans()).await {
-                        if due.is_empty() { continue; }
+                    if let Ok(Ok(due)) =
+                        tauri::async_runtime::spawn_blocking(move || engine.poll_plans()).await
+                    {
+                        if due.is_empty() {
+                            continue;
+                        }
                         if due.iter().any(|plan| plan.notifications) {
-                            let _ = handle.notification().builder().title("Openmind").body("You have time set aside for a conversation.").show();
+                            let _ = handle
+                                .notification()
+                                .builder()
+                                .title("Openmind")
+                                .body("You have time set aside for a conversation.")
+                                .show();
                         }
                         let _ = handle.emit("planned-session-due", &due);
                     }

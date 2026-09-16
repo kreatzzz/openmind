@@ -18,15 +18,15 @@ use crate::notes::{
     MemoryEvidenceState, MemoryKind, MemoryRecord, NoteKind, NotePatch, NotesInput, UserNote,
     MAX_CANDIDATE_CONTENT_CHARS, MAX_EVIDENCE_QUOTE_CHARS,
 };
-use crate::{
-    app_settings::{LineWidth, NoteJob, ProviderSettings, ReadingSettings, DEFAULT_OLLAMA_URL},
-    engine::ProviderKind,
-};
 use crate::retrieval::{
     cosine_similarity, decode_vector, encode_vector, fts_query, fuse_rankings,
     EmbeddingConfiguration, EmbeddingSource, MemoryIndexState, MemoryIndexStatus, MemoryView,
     QueryEmbedding, RetrievalOptions, RetrievalResult, RetrievedMemory, MAX_RETRIEVAL_CANDIDATES,
     MIN_SEMANTIC_SIMILARITY,
+};
+use crate::{
+    app_settings::{LineWidth, NoteJob, ProviderSettings, ReadingSettings, DEFAULT_OLLAMA_URL},
+    engine::ProviderKind,
 };
 
 pub const DATABASE_FILE_NAME: &str = "vault.db";
@@ -186,7 +186,10 @@ impl Vault {
         crate::scheduler::list(&self.connection)
     }
 
-    pub fn create_plan(&self, input: crate::scheduler::PlanInput) -> Result<crate::scheduler::SessionPlan> {
+    pub fn create_plan(
+        &self,
+        input: crate::scheduler::PlanInput,
+    ) -> Result<crate::scheduler::SessionPlan> {
         crate::scheduler::create(&self.connection, input, Utc::now())
     }
 
@@ -194,7 +197,12 @@ impl Vault {
         crate::scheduler::remove(&self.connection, id, revision)
     }
 
-    pub fn enable_plan(&self, id: &str, enabled: bool, revision: i64) -> Result<crate::scheduler::SessionPlan> {
+    pub fn enable_plan(
+        &self,
+        id: &str,
+        enabled: bool,
+        revision: i64,
+    ) -> Result<crate::scheduler::SessionPlan> {
         crate::scheduler::set_enabled(&self.connection, id, enabled, revision, Utc::now())
     }
 

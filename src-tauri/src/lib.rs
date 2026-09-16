@@ -5,9 +5,9 @@ pub mod lifecycle;
 pub mod models;
 pub mod notes;
 pub mod provider;
-pub mod scheduler;
 pub mod remote;
 pub mod retrieval;
+pub mod scheduler;
 pub mod vault;
 
 #[cfg(feature = "desktop")]
