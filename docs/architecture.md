@@ -129,6 +129,14 @@ For a validated 8,192-token model configuration, an initial test budget is 1,500
 
 Keep the current user turn and fixed policy intact. Trim low-ranked memories and older history first. If the message cannot fit, ask the user to shorten it or select a capable model. Never silently cut away the user's meaning or the policy. Cache summaries with source revisions and invalidate them after edits or deletion.
 
+## Conversation controls in the engineering preview
+
+Each conversation has an editable title and independent remembered-context and notebook-saving preferences. Defaults preserve the existing preview behavior: both are enabled. Store these preferences and their revision inside the encrypted vault. A settings update uses the expected revision and is refused during an active reply or derivation, preserving a stable policy for in-flight work.
+
+With remembered context disabled, the conversation does not retrieve saved memory or add new memory records. Its transcript remains saved and available as recent context within that conversation. Existing memory records are retained and can still be used by other conversations with memory enabled. Notebook saving is a separate choice; turning it off retains existing notes. These controls do not implement a private or transient session.
+
+Record the two write permissions with each submitted turn's derivation job. Turning a preference off revokes the corresponding permission on outstanding jobs; turning it on never expands an older job's permission. This prevents retries from deriving records from a message submitted while that branch was disabled. If neither branch is permitted, skip the structured provider call. Validate and persist only permitted output branches, retaining the existing evidence and deletion rules.
+
 ## Sessions and reminders
 
 Sessions have `open`, `paused`, and `completed` states. A planned session is a calendar intention, not a reservation of the AI. Starting a spontaneous conversation uses the same session engine. User notes update during the conversation; session closure can consolidate them into an editable summary without requiring another call when the existing notes are sufficient.

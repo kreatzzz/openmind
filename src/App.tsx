@@ -11,6 +11,7 @@ import {
   LockKeyhole,
   Menu,
   Plus,
+  SlidersHorizontal,
   Settings2,
   Search,
   Trash2,
@@ -18,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { Dialog } from "./components/Dialog";
+import { ConversationControls } from "./components/ConversationControls";
 import { Mark } from "./components/Mark";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { Notebook } from "./components/Notebook";
@@ -40,6 +42,9 @@ const SAMPLE_SESSION: Session = {
   title: "Making room for a slower week",
   createdAt: "2026-09-07T09:00:00Z",
   updatedAt: "2026-09-07T09:00:00Z",
+  revision: 1,
+  memoryEnabled: true,
+  notesEnabled: true,
 };
 const SAMPLE_MESSAGES: Message[] = [
   {
@@ -126,6 +131,7 @@ export default function App() {
   const [passphrase, setPassphrase] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [settings, setSettings] = useState(false);
+  const [conversationControls, setConversationControls] = useState(false);
   const [notes, setNotes] = useState(false);
   const [memoryView, setMemoryView] = useState(false);
   const [drawer, setDrawer] = useState(false);
@@ -149,7 +155,45 @@ export default function App() {
   const atBottom = useRef(true);
   const scroll = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const draftsBySession = useRef(new Map<string, string>());
   const session = sessions.find((item) => item.id === selected);
+
+  function setDraftValue(value: string, sessionId: string | null = selected) {
+    setDraft(value);
+    if (sessionId) draftsBySession.current.set(sessionId, value);
+  }
+
+  function rememberCurrentDraft() {
+    if (selected) draftsBySession.current.set(selected, draft);
+  }
+
+  const sessionMemoryEnabled = session?.memoryEnabled !== false;
+  const sessionNotesEnabled = session?.notesEnabled !== false;
+
+  function derivationLabel(memoryEnabled: boolean, notesEnabled: boolean) {
+    if (memoryEnabled && notesEnabled) return "notes";
+    if (memoryEnabled) return "remembered context";
+    if (notesEnabled) return "notes";
+    return "";
+  }
+
+  function formatDerivationStatus(
+    status: "updating" | "complete" | "failed" | "skipped",
+    memoryEnabled: boolean,
+    notesEnabled: boolean,
+    message?: string,
+  ) {
+    const label = derivationLabel(memoryEnabled, notesEnabled);
+    if (!label) return "";
+    if (status === "skipped")
+      return message || "No saved updates for this message.";
+    if (status === "updating") return `Updating ${label}`;
+    if (status === "complete")
+      return `${label.charAt(0).toUpperCase()}${label.slice(1)} updated`;
+    if (message?.toLowerCase().startsWith("notes update stopped"))
+      return `${label.charAt(0).toUpperCase()}${label.slice(1)} update stopped. You can retry it.`;
+    return message || `${label} could not be updated. Your reply is saved.`;
+  }
 
   async function loadSessions() {
     const request = generation.current;
@@ -343,6 +387,7 @@ export default function App() {
     changeProvider("ollama");
     setSample(false);
     setIsDemo(false);
+    setConversationControls(false);
     setNotes(false);
     setUserNotes([]);
     setMemories([]);
@@ -352,15 +397,19 @@ export default function App() {
     setMessages([]);
     setSessions([]);
     setSelected(null);
-    setDraft("");
+    draftsBySession.current.clear();
+    setDraftValue("", null);
     setDrawer(false);
     setSettings(false);
     setHighlight(null);
     setScreen(isDesktop ? "setup" : "browser");
   }
   async function selectSession(id: string) {
+    rememberCurrentDraft();
     setNotes(false);
     setMemoryView(false);
+    setConversationControls(false);
+    setNoteStatus("");
     if (sending || busy || id === selected) {
       setDrawer(false);
       return;
@@ -373,7 +422,7 @@ export default function App() {
       if (generation.current === request) {
         setSelected(id);
         setMessages(loaded);
-        setDraft("");
+        setDraftValue(draftsBySession.current.get(id) ?? "", id);
         atBottom.current = true;
         setNewReply(false);
         setDrawer(false);
@@ -386,6 +435,7 @@ export default function App() {
   }
   async function newSession() {
     if (sending || busy) return;
+    rememberCurrentDraft();
     const request = ++generation.current;
     setBusy(true);
     setError("");
@@ -395,15 +445,75 @@ export default function App() {
       setSessions((current) => [item, ...current]);
       setNotes(false);
       setMemoryView(false);
+      setConversationControls(false);
+      setNoteStatus("");
       setSelected(item.id);
       setMessages([]);
-      setDraft("");
+      setDraftValue(draftsBySession.current.get(item.id) ?? "", item.id);
       setDrawer(false);
       setNewReply(false);
       atBottom.current = true;
       composer.current?.focus();
     } catch (reason) {
       if (request === generation.current) setError(errorText(reason));
+    } finally {
+      if (request === generation.current) setBusy(false);
+    }
+  }
+  function openConversationControls() {
+    if (!session || sending || busy) return;
+    setConversationControls(true);
+  }
+  async function updateConversationSession(
+    target: Session,
+    title: string,
+    memoryEnabled: boolean,
+    notesEnabled: boolean,
+  ): Promise<Session | null> {
+    const request = generation.current;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = sample
+        ? {
+            ...target,
+            title,
+            memoryEnabled,
+            notesEnabled,
+            revision: target.revision + 1,
+          }
+        : await desktop.updateSession(
+            target.id,
+            title,
+            memoryEnabled,
+            notesEnabled,
+            target.revision,
+          );
+      if (request !== generation.current) return null;
+      setSessions((items) =>
+        items.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      setNoteStatus("");
+      setAnnouncement("Conversation controls saved.");
+      return updated;
+    } catch (reason) {
+      if (request === generation.current) {
+        if (!sample) {
+          try {
+            const latest = await desktop.listSessions();
+            if (request === generation.current) {
+              setSessions(latest);
+              if (!latest.some((item) => item.id === target.id)) {
+                setConversationControls(false);
+                setError("This conversation is no longer available.");
+              }
+            }
+          } catch {
+            /* Keep the entered draft and the original revision for retry. */
+          }
+        }
+      }
+      throw reason;
     } finally {
       if (request === generation.current) setBusy(false);
     }
@@ -437,7 +547,8 @@ export default function App() {
       setHighlight(null);
       setSessions([]);
       setSelected(null);
-      setDraft("");
+      draftsBySession.current.clear();
+      setDraftValue("", null);
       setPassphrase("");
       setConfirmation("");
       setError("");
@@ -449,6 +560,7 @@ export default function App() {
       setModel("");
       setAnnouncement("Vault locked.");
       setSettings(false);
+      setConversationControls(false);
       setNotes(false);
       setMemoryView(false);
       setDeleteConversation(false);
@@ -477,9 +589,10 @@ export default function App() {
       setSessions((items) => items.filter((item) => item.id !== id));
       setUserNotes((items) => items.filter((item) => item.sessionId !== id));
       setMemories((items) => items.filter((item) => item.sessionId !== id));
+      draftsBySession.current.delete(id);
       setSelected(null);
       setMessages([]);
-      setDraft("");
+      setDraftValue("", null);
       setHighlight(null);
       setNoteStatus("");
       setDeleteConversation(false);
@@ -563,6 +676,7 @@ export default function App() {
   }
   async function openMemorySource(memory: MemoryRecord) {
     const request = generation.current;
+    rememberCurrentDraft();
     atBottom.current = false;
     setNewReply(false);
     if (memory.sessionId !== selected) {
@@ -574,7 +688,10 @@ export default function App() {
         if (request !== generation.current) return;
         setSelected(memory.sessionId);
         setMessages(loaded);
-        setDraft("");
+        setDraftValue(
+          draftsBySession.current.get(memory.sessionId) ?? "",
+          memory.sessionId,
+        );
       } finally {
         if (request === generation.current) setBusy(false);
       }
@@ -582,6 +699,7 @@ export default function App() {
     if (request === generation.current) {
       setNotes(false);
       setMemoryView(false);
+      setNoteStatus("");
       setHighlight(memory.sourceMessageId);
     }
   }
@@ -640,6 +758,8 @@ export default function App() {
       setSettings(true);
       return;
     }
+    const turnMemoryEnabled = sessionMemoryEnabled;
+    const turnNotesEnabled = sessionNotesEnabled;
     activeTurn.current = true;
     stopRequested.current = false;
     setSending(true);
@@ -650,9 +770,13 @@ export default function App() {
     const request = generation.current;
     let received = false;
     let cancellationSent = false;
-    setDraft("");
+    setDraftValue("", selected);
     const restoreDraft = () =>
-      setDraft((current) => (current ? `${content}\n\n${current}` : content));
+      setDraft((current) => {
+        const restored = current ? `${content}\n\n${current}` : content;
+        if (selected) draftsBySession.current.set(selected, restored);
+        return restored;
+      });
     try {
       let sessionId = selected;
       if (!sessionId) {
@@ -718,15 +842,14 @@ export default function App() {
                 if (generation.current === request) setError(errorText(reason));
               });
             }
-            const status =
-              event.status === "updating"
-                ? "Updating notes"
-                : event.status === "complete"
-                  ? "Notes updated"
-                  : event.message ||
-                    "Notes could not be updated. Your reply is saved.";
+            const status = formatDerivationStatus(
+              event.status,
+              event.memoryEnabled ?? turnMemoryEnabled,
+              event.notesEnabled ?? turnNotesEnabled,
+              event.message,
+            );
             setNoteStatus(status);
-            setAnnouncement(status);
+            if (status) setAnnouncement(status);
           }
           if (event.type === "error") {
             setError(event.message);
@@ -742,13 +865,16 @@ export default function App() {
     } finally {
       if (generation.current === request) {
         try {
-          const [updatedSessions, updatedNotes] = await Promise.all([
-            desktop.listSessions(),
-            desktop.listNotes(),
-          ]);
+          const [updatedSessions, updatedNotes, updatedMemories] =
+            await Promise.all([
+              desktop.listSessions(),
+              desktop.listNotes(),
+              desktop.listMemories(),
+            ]);
           if (generation.current === request) {
             setSessions(updatedSessions);
             setUserNotes(updatedNotes);
+            setMemories(updatedMemories);
           }
         } catch {
           if (generation.current === request)
@@ -778,7 +904,16 @@ export default function App() {
         (message) =>
           message.role === "assistant" && message.status === "complete",
       );
-    if (!reply || activeTurn.current || busy || sample) return;
+    if (
+      !reply ||
+      activeTurn.current ||
+      busy ||
+      sample ||
+      (!sessionMemoryEnabled && !sessionNotesEnabled)
+    )
+      return;
+    const retryMemoryEnabled = sessionMemoryEnabled;
+    const retryNotesEnabled = sessionNotesEnabled;
     if (
       !connected ||
       !model ||
@@ -791,7 +926,9 @@ export default function App() {
     activeTurn.current = true;
     stopRequested.current = false;
     setSending(true);
-    setNoteStatus("Updating notes");
+    setNoteStatus(
+      formatDerivationStatus("updating", retryMemoryEnabled, retryNotesEnabled),
+    );
     setError("");
     try {
       await desktop.retryNotes({
@@ -803,21 +940,28 @@ export default function App() {
         onEvent: (event) => {
           if (request !== generation.current) return;
           if (event.type === "notes") {
-            setNoteStatus(
-              event.status === "updating"
-                ? "Updating notes"
-                : event.status === "complete"
-                  ? "Notes updated"
-                  : event.message || "Notes could not be updated. Try again.",
+            const status = formatDerivationStatus(
+              event.status,
+              event.memoryEnabled ?? retryMemoryEnabled,
+              event.notesEnabled ?? retryNotesEnabled,
+              event.message,
             );
+            setNoteStatus(status);
+            if (status) setAnnouncement(status);
             if (stopRequested.current)
               void desktop.cancelTurn().catch(() => {});
           }
           if (event.type === "error") setError(event.message);
         },
       });
-      const updated = await desktop.listNotes();
-      if (request === generation.current) setUserNotes(updated);
+      const [updatedNotes, updatedMemories] = await Promise.all([
+        desktop.listNotes(),
+        desktop.listMemories(),
+      ]);
+      if (request === generation.current) {
+        setUserNotes(updatedNotes);
+        setMemories(updatedMemories);
+      }
     } catch (reason) {
       if (request === generation.current) setNoteStatus(errorText(reason));
     } finally {
@@ -1003,6 +1147,16 @@ export default function App() {
               </div>
               <div className="header-actions">
                 <span className="preview-badge">Engineering preview</span>
+                {!notes && !memoryView && session && (
+                  <button
+                    className="icon-button"
+                    aria-label="Conversation controls"
+                    onClick={openConversationControls}
+                    disabled={sending || busy}
+                  >
+                    <SlidersHorizontal size={16} />
+                  </button>
+                )}
                 {!notes && !memoryView && selected && !sample && (
                   <button
                     className="icon-button"
@@ -1026,6 +1180,27 @@ export default function App() {
                 </button>
               </div>
             )}
+            {!notes &&
+              !memoryView &&
+              session &&
+              (!sessionMemoryEnabled || !sessionNotesEnabled) && (
+                <div className="conversation-status" role="status">
+                  <span>
+                    {!sessionMemoryEnabled && !sessionNotesEnabled
+                      ? "Remembered context and Your notes are off for this conversation."
+                      : !sessionMemoryEnabled
+                        ? "Remembered context is off for this conversation."
+                        : "Your notes are off for this conversation."}
+                  </span>
+                  <button
+                    className="text-button"
+                    onClick={openConversationControls}
+                    disabled={sending || busy}
+                  >
+                    Review controls
+                  </button>
+                </div>
+              )}
             {memoryView ? (
               <MemoryWorkspace
                 memories={memories}
@@ -1072,6 +1247,7 @@ export default function App() {
                 }}
                 onSource={async (note) => {
                   const request = generation.current;
+                  rememberCurrentDraft();
                   atBottom.current = false;
                   setNewReply(false);
                   if (note.sessionId !== selected) {
@@ -1081,7 +1257,10 @@ export default function App() {
                       if (request !== generation.current) return;
                       setSelected(note.sessionId);
                       setMessages(loaded);
-                      setDraft("");
+                      setDraftValue(
+                        draftsBySession.current.get(note.sessionId) ?? "",
+                        note.sessionId,
+                      );
                     } finally {
                       if (request === generation.current) setBusy(false);
                     }
@@ -1089,6 +1268,7 @@ export default function App() {
                   if (request === generation.current) {
                     setNotes(false);
                     setMemoryView(false);
+                    setNoteStatus("");
                     setHighlight(note.sourceMessageId);
                   }
                 }}
@@ -1160,7 +1340,9 @@ export default function App() {
                           id="message"
                           rows={2}
                           value={draft}
-                          onChange={(event) => setDraft(event.target.value)}
+                          onChange={(event) =>
+                            setDraftValue(event.target.value)
+                          }
                           placeholder="What's on your mind?"
                           disabled={busy}
                           onKeyDown={(event) => {
@@ -1180,9 +1362,7 @@ export default function App() {
                         <div className="composer-toolbar">
                           <span>
                             {sending
-                              ? noteStatus === "Updating notes"
-                                ? "Updating notes"
-                                : "Generating a reply"
+                              ? noteStatus || "Generating a reply"
                               : enterToSend
                                 ? "Shift + Enter for a new line"
                                 : "Ctrl / ⌘ + Enter to send"}
@@ -1219,6 +1399,7 @@ export default function App() {
                         <p className="note-status">{noteStatus}</p>
                       )}
                       {!sample &&
+                        (sessionMemoryEnabled || sessionNotesEnabled) &&
                         messages.some(
                           (message) =>
                             message.role === "assistant" &&
@@ -1229,7 +1410,9 @@ export default function App() {
                             onClick={updateNotes}
                             disabled={sending || busy}
                           >
-                            Update notes
+                            {sessionMemoryEnabled && !sessionNotesEnabled
+                              ? "Update remembered context"
+                              : "Update notes"}
                           </button>
                         )}
                     </div>
@@ -1313,6 +1496,16 @@ export default function App() {
             </button>
           </div>
         </Dialog>
+      )}
+      {conversationControls && session && (
+        <ConversationControls
+          key={session.id}
+          session={session}
+          sample={sample}
+          disabled={sending || busy}
+          onClose={() => setConversationControls(false)}
+          onSave={updateConversationSession}
+        />
       )}
       {settings && (
         <Dialog title="Settings" onClose={() => setSettings(false)}>

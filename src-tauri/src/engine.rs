@@ -47,15 +47,20 @@ pub enum TurnEvent {
         status: NotesStatus,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memory_enabled: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notes_enabled: Option<bool>,
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NotesStatus {
     Updating,
     Complete,
     Failed,
+    Skipped,
 }
 
 pub const DEMO_ID: &str = "demo";
@@ -84,6 +89,9 @@ pub struct PreparedNotes {
     pub attempt_id: String,
     pub input: NotesInput,
     pub cancel: CancellationToken,
+    /// Both branches were disabled for this source job, so no provider call
+    /// is allowed and the job was completed without writing output.
+    pub skipped: bool,
 }
 
 /// The durable reply status and the atomically reserved notes job, if any.
@@ -272,6 +280,26 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
+    pub fn update_session(
+        &self,
+        id: &str,
+        title: &str,
+        memory_enabled: bool,
+        notes_enabled: bool,
+        expected_revision: i64,
+    ) -> Result<Session, String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop the current operation before changing conversation settings.".into());
+        }
+        state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .update_session(id, title, memory_enabled, notes_enabled, expected_revision)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<(), String> {
         let mut state = self.state()?;
         if state.active.is_some() || state.notes_active.is_some() {
@@ -314,12 +342,21 @@ impl Engine {
             return Err("Wait for the current reply to finish, or stop it first.".into());
         }
         let vault = state.vault.as_mut().ok_or("Unlock your vault first.")?;
+        let session = vault
+            .get_session(session_id)
+            .map_err(|error| error.to_string())?;
         let mut history = vault
             .list_context_messages(session_id)
             .map_err(|error| error.to_string())?;
-        let memory = vault
-            .memory_context(1_000)
-            .map_err(|error| error.to_string())?;
+        // Check the session branch before touching the global memory bundle;
+        // an off conversation must never retrieve saved context.
+        let memory = if session.memory_enabled {
+            vault
+                .memory_context(1_000)
+                .map_err(|error| error.to_string())?
+        } else {
+            String::new()
+        };
         let (user, assistant) = vault
             .begin_turn(session_id, content)
             .map_err(|error| error.to_string())?;
@@ -412,6 +449,15 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
+    pub fn notes_permissions(&self, message_id: &str) -> Result<(bool, bool), String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .notes_permissions(message_id)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn edit_memory(
         &self,
         id: &str,
@@ -472,7 +518,18 @@ impl Engine {
         remote_consent: bool,
     ) -> Result<Option<PreparedNotes>, String> {
         let mut state = self.state()?;
-        authorize_provider(&state, provider, remote_consent)?;
+        let call_required = state
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .notes_call_required(message_id)
+            .map_err(|error| error.to_string())?;
+        // Both branches can be disabled for a source turn. In that case the
+        // structured call is intentionally skipped, including remote-provider
+        // authorization, because no source data will leave the vault.
+        if call_required {
+            authorize_provider(&state, provider, remote_consent)?;
+        }
         prepare_notes_locked(&mut state, message_id)
     }
 
@@ -566,18 +623,26 @@ fn prepare_notes_locked(
     if state.active.is_some() || state.notes_active.is_some() {
         return Err("Wait for the current operation to finish.".into());
     }
-    let input = match state
-        .vault
-        .as_mut()
-        .ok_or("Unlock your vault first.")?
-        .begin_notes(message_id)
-    {
+    let vault = state.vault.as_mut().ok_or("Unlock your vault first.")?;
+    let input = match vault.begin_notes(message_id) {
         Ok(input) => input,
         Err(crate::vault::VaultError::NotesAlreadyComplete) => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let cancel = CancellationToken::new();
+    let skipped = !input.memory_enabled && !input.notes_enabled;
+    if skipped {
+        vault
+            .complete_notes_without_writes(message_id)
+            .map_err(|error| error.to_string())?;
+        return Ok(Some(PreparedNotes {
+            attempt_id,
+            input,
+            cancel,
+            skipped: true,
+        }));
+    }
     state.notes_active = Some(ActiveNotes {
         attempt_id: attempt_id.clone(),
         message_id: message_id.into(),
@@ -587,6 +652,7 @@ fn prepare_notes_locked(
         attempt_id,
         input,
         cancel,
+        skipped: false,
     }))
 }
 
@@ -643,6 +709,35 @@ mod tests {
 
     const PASSPHRASE: &str = "a synthetic vault passphrase";
 
+    fn synthetic_patch() -> NotePatch {
+        serde_json::from_value(serde_json::json!({
+            "memories": [{
+                "kind": "goal",
+                "content": "Take a synthetic walk",
+                "evidenceQuote": "I want to take a walk."
+            }],
+            "notes": [{
+                "kind": "next_step",
+                "content": "Plan a synthetic walk.",
+                "evidenceQuote": "I want to take a walk."
+            }]
+        }))
+        .expect("synthetic patch")
+    }
+
+    fn complete_turn(engine: &Engine, session_id: &str) -> FinishedTurn {
+        let turn = engine
+            .prepare_turn(session_id, "I want to take a walk.")
+            .expect("prepare turn");
+        engine
+            .append_chunk(&turn.assistant.id, "A short synthetic reply.")
+            .expect("append reply");
+        engine
+            .finish_turn_and_prepare_notes(&turn.assistant.id, MessageStatus::Complete)
+            .expect("finish turn")
+            .expect("finished turn")
+    }
+
     #[test]
     fn demo_is_separate_and_never_unlocks_or_replaces_personal_vault() {
         let temp = tempfile::tempdir().unwrap();
@@ -665,6 +760,315 @@ mod tests {
         engine.lock().unwrap();
         engine.unlock(PASSPHRASE, false).unwrap();
         assert_eq!(engine.list_sessions().unwrap(), vec![personal]);
+    }
+
+    #[test]
+    fn session_settings_are_persisted_and_revision_checked() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        assert_eq!(session.revision, 1);
+        assert!(session.memory_enabled);
+        assert!(session.notes_enabled);
+
+        let updated = engine
+            .update_session(
+                &session.id,
+                "🌿 A calmer synthetic week",
+                false,
+                true,
+                session.revision,
+            )
+            .unwrap();
+        assert_eq!(updated.title, "🌿 A calmer synthetic week");
+        assert_eq!(updated.revision, 2);
+        assert!(!updated.memory_enabled);
+        assert!(updated.notes_enabled);
+        assert!(engine
+            .update_session(&session.id, "stale", true, false, session.revision)
+            .unwrap_err()
+            .contains("session revision conflict"));
+        assert!(engine
+            .update_session(
+                &session.id,
+                &"🙂".repeat(crate::vault::MAX_SESSION_TITLE_CHARS + 1),
+                false,
+                true,
+                updated.revision,
+            )
+            .is_err());
+
+        engine.lock().unwrap();
+        engine.unlock(PASSPHRASE, false).unwrap();
+        assert_eq!(engine.list_sessions().unwrap(), vec![updated]);
+    }
+
+    #[test]
+    fn session_settings_change_is_rejected_during_reply_or_notes_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+
+        let turn = engine
+            .prepare_turn(&session.id, "A synthetic active reply.")
+            .unwrap();
+        assert!(engine
+            .update_session(&session.id, "renamed", false, false, session.revision)
+            .is_err());
+        engine.cancel_turn().unwrap();
+        engine
+            .finish_turn(&turn.assistant.id, MessageStatus::Interrupted)
+            .unwrap();
+
+        let finished = complete_turn(&engine, &session.id);
+        let notes = finished.notes.unwrap().unwrap();
+        assert!(engine
+            .update_session(&session.id, "renamed", false, false, session.revision)
+            .is_err());
+        engine.cancel_turn().unwrap();
+        assert_eq!(
+            engine.finish_notes(&notes.attempt_id, None).unwrap(),
+            Some(NotesStatus::Failed)
+        );
+        let updated = engine
+            .update_session(&session.id, "renamed", false, false, session.revision)
+            .unwrap();
+        assert_eq!(updated.title, "renamed");
+        assert!(!updated.memory_enabled);
+        assert!(!updated.notes_enabled);
+    }
+
+    #[test]
+    fn memory_off_session_suppresses_retrieval_and_writes_but_keeps_notes() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+
+        // Seed one active memory while both branches are enabled.
+        let first = complete_turn(&engine, &session.id);
+        let first_notes = first.notes.unwrap().unwrap();
+        engine
+            .finish_notes(&first_notes.attempt_id, Some(&synthetic_patch()))
+            .unwrap();
+        assert_eq!(engine.list_memories().unwrap().len(), 1);
+        assert_eq!(engine.list_notes().unwrap().len(), 1);
+
+        let settings = engine
+            .update_session(&session.id, "Memory off", false, true, session.revision)
+            .unwrap();
+        let second = complete_turn(&engine, &session.id);
+        assert!(second.status == MessageStatus::Complete);
+        // The global saved bundle is skipped before retrieval for this
+        // conversation, while its ordinary transcript remains available.
+        let turn_history_memory = engine
+            .prepare_turn(&session.id, "should be blocked while notes active")
+            .err()
+            .expect("notes work blocks another turn");
+        assert!(turn_history_memory.contains("current reply"));
+        let second_notes = second.notes.unwrap().unwrap();
+        assert!(!second_notes.input.memory_enabled);
+        assert!(second_notes.input.notes_enabled);
+        engine
+            .finish_notes(&second_notes.attempt_id, Some(&synthetic_patch()))
+            .unwrap();
+        // The old memory remains durable but the off-source turn cannot add a
+        // new one; the notes branch still receives its output.
+        assert_eq!(engine.list_memories().unwrap().len(), 1);
+        assert_eq!(engine.list_notes().unwrap().len(), 2);
+        assert_eq!(settings.revision, 2);
+
+        let next = engine
+            .prepare_turn(&session.id, "A transcript-only synthetic follow-up.")
+            .unwrap();
+        assert!(next.memory.is_empty());
+        assert!(next.history.iter().any(|message| {
+            message.role == MessageRole::User && message.content == "I want to take a walk."
+        }));
+        engine.cancel_turn().unwrap();
+        engine
+            .finish_turn(&next.assistant.id, MessageStatus::Interrupted)
+            .unwrap();
+    }
+
+    #[test]
+    fn notes_off_session_writes_memory_without_notebook_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let settings = engine
+            .update_session(&session.id, "Notes off", true, false, session.revision)
+            .unwrap();
+
+        let finished = complete_turn(&engine, &session.id);
+        let notes = finished.notes.unwrap().unwrap();
+        assert!(notes.input.memory_enabled);
+        assert!(!notes.input.notes_enabled);
+        assert_eq!(
+            engine
+                .finish_notes(&notes.attempt_id, Some(&synthetic_patch()))
+                .unwrap(),
+            Some(NotesStatus::Complete)
+        );
+        assert_eq!(engine.list_memories().unwrap().len(), 1);
+        assert!(engine.list_notes().unwrap().is_empty());
+        let next = engine
+            .prepare_turn(&session.id, "A synthetic memory follow-up.")
+            .unwrap();
+        assert!(next.memory.contains("Take a synthetic walk"));
+        assert_eq!(settings.revision, 2);
+        engine.cancel_turn().unwrap();
+        engine
+            .finish_turn(&next.assistant.id, MessageStatus::Interrupted)
+            .unwrap();
+    }
+
+    #[test]
+    fn neither_branch_skips_provider_and_marks_job_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        engine
+            .update_session(&session.id, "No derivation", false, false, session.revision)
+            .unwrap();
+
+        let finished = complete_turn(&engine, &session.id);
+        let notes = finished.notes.unwrap().unwrap();
+        assert!(notes.skipped);
+        assert!(!notes.input.memory_enabled);
+        assert!(!notes.input.notes_enabled);
+        assert!(engine.list_memories().unwrap().is_empty());
+        assert!(engine.list_notes().unwrap().is_empty());
+        // No remote consent or demo authorization is needed when no source
+        // branch can send data to a structured provider.
+        assert!(engine
+            .prepare_notes_with_provider(&notes.input.assistant_id, ProviderKind::Codex, false)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn turning_off_then_on_does_not_restore_failed_job_branch_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let turn = engine
+            .prepare_turn(&session.id, "I want to take a walk.")
+            .unwrap();
+        engine
+            .finish_turn(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap();
+
+        let disabled = engine
+            .update_session(&session.id, "Memory paused", false, true, session.revision)
+            .unwrap();
+        // Locking makes this pending job failed, then re-enable the session.
+        // Its captured memory permission must remain revoked.
+        engine.lock().unwrap();
+        engine.unlock(PASSPHRASE, false).unwrap();
+        let enabled = engine
+            .update_session(&session.id, "Memory resumed", true, true, disabled.revision)
+            .unwrap();
+        let retry = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
+        assert!(!retry.input.memory_enabled);
+        assert!(retry.input.notes_enabled);
+        engine
+            .finish_notes(&retry.attempt_id, Some(&synthetic_patch()))
+            .unwrap();
+        assert!(engine.list_memories().unwrap().is_empty());
+        assert_eq!(engine.list_notes().unwrap().len(), 1);
+        assert_eq!(enabled.revision, 3);
+    }
+
+    #[test]
+    fn source_submitted_while_memory_off_stays_memory_free_after_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let disabled = engine
+            .update_session(
+                &session.id,
+                "Memory disabled",
+                false,
+                true,
+                session.revision,
+            )
+            .unwrap();
+        let turn = engine
+            .prepare_turn(&session.id, "I want to take a walk.")
+            .unwrap();
+        engine
+            .finish_turn(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap();
+        let first_attempt = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
+        assert!(!first_attempt.input.memory_enabled);
+        assert!(first_attempt.input.notes_enabled);
+        engine.cancel_turn().unwrap();
+        assert_eq!(
+            engine
+                .finish_notes(&first_attempt.attempt_id, None)
+                .unwrap(),
+            Some(NotesStatus::Failed)
+        );
+
+        let enabled = engine
+            .update_session(&session.id, "Memory enabled", true, true, disabled.revision)
+            .unwrap();
+        let retry = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
+        assert!(!retry.input.memory_enabled);
+        assert!(retry.input.notes_enabled);
+        engine
+            .finish_notes(&retry.attempt_id, Some(&synthetic_patch()))
+            .unwrap();
+        assert!(engine.list_memories().unwrap().is_empty());
+        assert_eq!(engine.list_notes().unwrap().len(), 1);
+        assert_eq!(enabled.revision, 3);
+    }
+
+    #[test]
+    fn source_submitted_while_notes_off_stays_notebook_free_after_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let disabled = engine
+            .update_session(&session.id, "Notes disabled", true, false, session.revision)
+            .unwrap();
+        let turn = engine
+            .prepare_turn(&session.id, "I want to take a walk.")
+            .unwrap();
+        engine
+            .finish_turn(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap();
+        let first_attempt = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
+        assert!(first_attempt.input.memory_enabled);
+        assert!(!first_attempt.input.notes_enabled);
+        engine.cancel_turn().unwrap();
+        assert_eq!(
+            engine
+                .finish_notes(&first_attempt.attempt_id, None)
+                .unwrap(),
+            Some(NotesStatus::Failed)
+        );
+
+        let enabled = engine
+            .update_session(&session.id, "Notes enabled", true, true, disabled.revision)
+            .unwrap();
+        let retry = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
+        assert!(retry.input.memory_enabled);
+        assert!(!retry.input.notes_enabled);
+        engine
+            .finish_notes(&retry.attempt_id, Some(&synthetic_patch()))
+            .unwrap();
+        assert_eq!(engine.list_memories().unwrap().len(), 1);
+        assert!(engine.list_notes().unwrap().is_empty());
+        assert_eq!(enabled.revision, 3);
     }
 
     #[test]

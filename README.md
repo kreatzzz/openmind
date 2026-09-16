@@ -4,7 +4,7 @@ A desktop app in development for private, ongoing conversations about life, with
 
 **Status: desktop engineering preview. Not evaluated clinical care.**
 
-The current implementation includes a Geist-inspired desktop UI, a separate one-click demo, an encrypted conversation vault, Ollama streaming, source-linked editable notes, and a Remembered context workspace with correction and forgetting controls. A structured follow-up call saves user notes and internal memory together. Relationship mapping and the full clinical workflow remain in development. See [prototype capabilities, limitations, and setup](docs/prototype.md).
+The current implementation includes a Geist-inspired desktop UI, a separate one-click demo, an encrypted conversation vault, Ollama streaming, source-linked editable notes, and a Remembered context workspace with correction and forgetting controls. Each conversation can be renamed and has independent switches for remembered context and notebook saving. A structured follow-up call saves user notes and internal memory together. Relationship mapping and the full clinical workflow remain in development. See [prototype capabilities, limitations, and setup](docs/prototype.md).
 
 Openmind is intended to connect life events, people, recurring concerns, and goals in an encrypted memory graph. Users can start a conversation whenever they want or set a reminder for a planned session. Local inference is the default; connecting a remote API is an explicit choice.
 

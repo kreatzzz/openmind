@@ -29,6 +29,12 @@ Call 2 runs once per completed turn in the normal case. Under rapid input, coale
 
 Recent raw turns cover ordinary lag. If pending history exceeds the context budget, reduce or pause consolidation backlog with a bounded catch-up step and explain the wait. Never silently omit unprocessed disclosures or exceed the model's context window.
 
+## Per-conversation permissions in the engineering preview
+
+The two write branches are independently enabled per conversation. Snapshot their permissions when input and its notes job are committed. Disabling a branch revokes its pending or failed jobs without deleting completed records; enabling it again only grants permission to newly submitted messages. Recheck the durable job permissions when claiming and applying a patch. Skip the structured request when both branches are disallowed, and show a skipped state rather than claiming notes were updated.
+
+The conversation's remembered-context preference also gates retrieval of saved memory for the response call. Its own transcript remains persisted and is still used as recent conversation context. This differs from the proposed private-session mode, which remains unimplemented.
+
 ## What goes into user notes
 
 The notebook is a distinct output, not a public copy of the model's internal notes. Its purpose is to help the user remember what was discussed and what they chose to do. Keep paragraphs brief and actions editable.

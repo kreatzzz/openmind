@@ -13,8 +13,9 @@ The first implementation is a single-user desktop foundation. It is not an evalu
 - An editable notebook with source links and revision checks. Generation adds records for its own turn and cannot overwrite existing edits. Note deletion erases its content while retaining a tombstone. Conversation deletion cascades to its messages, notebook entries, internal memory, and note jobs.
 - Bounded retrieval of internal memory for later replies, clearly marked as untrusted historical context. User corrections take priority over generated records; current input takes priority in the context budget.
 - A separate Remembered context workspace with grouped statements, search, visible source evidence, conversation links, revision-checked corrections, and explicit forgetting controls. The browser demo provides fictional records with temporary edits.
+- Conversation controls with editable titles and independent remembered-context and notebook-saving switches, stored in the encrypted vault with revision checks. Off states remain visible in the conversation.
 - Durable notes jobs and explicit retry without resending the reply. Cancelled, interrupted, or malformed derivations leave existing notes intact. Reopening a vault marks unfinished jobs as failed. Completed replies can retry notes; interrupted replies do not generate notes.
-- Migration from conversation-only and paired-notes vaults to schema version 3, including memory revisions and source exclusions. Unknown future schemas are refused.
+- Migration from conversation-only and paired-notes vaults to schema version 4, including memory revisions, source exclusions, conversation preferences, and per-job output permissions. Unknown future schemas are refused.
 - A separate seeded demo vault opened with one click. It cannot unlock or replace the personal vault.
 - At most 20 recent messages and 6,000 UTF-8 bytes of conversation context. Each request asks for an 8,192-token context and at most 1,024 output tokens. Extended thinking is disabled in the request. These are conservative prototype limits, not validated budgets for every model or tokenizer.
 
@@ -25,6 +26,12 @@ Corrections update the selected record with a revision check, retain its origina
 Forgetting is scoped to the selected source message. Confirmation shows the affected memories and notebook entries, including any edited notes. The transaction clears those derived records and keeps a content-free source exclusion so a retry cannot recreate them. The original user message and its associated assistant reply remain readable in history but are excluded from later model context. Existing backups and provider copies are unchanged. This is not topic-wide forgetting: separately sourced disclosures and later messages can still contain the same information. Delete the conversation to remove its history and derived records from the active vault.
 
 The browser view offers a clearly labeled synthetic sample. Native vault and inference operations require the desktop shell. Connection and reading preferences currently last only for the open app instance. Only the appearance preference is saved in webview local storage.
+
+## Conversation controls
+
+Each conversation starts with remembered context and notebook saving enabled. Conversation controls can rename it or change either preference. Disabling remembered context stops saved-memory retrieval in that conversation and prevents new memory records; disabling notebook saving stops new notebook entries. Existing memories and notes remain until explicitly deleted. The transcript is still saved and used as recent context in the conversation, so these switches do not create a private session.
+
+Turning a switch off also revokes that output for outstanding updates in the conversation. Turning it back on does not process messages submitted while it was off. Each job retains its permitted outputs across retries and restarts. When neither output is permitted, Openmind skips the follow-up provider request. Settings cannot change during an active reply or notes update; stop that operation first.
 
 ## Subscription bridge checkpoint
 
@@ -120,3 +127,9 @@ The small Ollama fixture establishes protocol operation only. Its responses have
 The remembered-context implementation passes the production frontend build, 17 UI tests, 48 core regression tests, native macOS compilation, formatting, and all-target Clippy with warnings denied. Three opt-in live-provider tests were not run. Regression coverage includes populated schema-v2 migration followed by forgetting, correction persistence, source-history exclusion, stale derivation rejection, linked-note deletion, and UI refresh failures.
 
 A production-build browser check using synthetic data exercised correction, source-scoped forgetting and linked-note removal, light/dark appearance, reduced motion, and desktop/narrow layouts without page errors or horizontal overflow. This does not establish native VoiceOver/NVDA accessibility, Windows behavior, live inference quality, or signed installer readiness. macOS and Windows CI runs on the pull request; native manual accessibility and installer checks remain outstanding.
+
+## Conversation controls verification
+
+The conversation-controls increment passes 23 UI tests and 57 core regression tests, the production frontend build, native macOS compilation, formatting, and all-target Clippy with warnings denied. Three opt-in live-provider tests were not run. Tests cover independent output branches, skipping both-disabled jobs, messages submitted while saving was disabled, revocation across restart/re-enable/retry, active-work restrictions, revision conflicts, title limits, and schema-v3 migration preserving forgotten-source exclusions. Earlier schema migrations remain covered.
+
+Production-build browser checks with fictional data cover title changes, independent switches, visible off states, retained memory records, light/dark dialogs, reduced motion, and narrow layouts without page errors or horizontal overflow. Native screen-reader and Windows manual testing remain outstanding; both platform CI jobs run on the new pull request. The preceding remembered-context PR passed macOS and Windows CI before merging.
