@@ -639,8 +639,16 @@ impl Engine {
         provider: ProviderKind,
         remote_consent: bool,
     ) -> Result<PreparedTurn, String> {
+        let provider_revision = self.provider_settings()?.revision;
         let memory = self.retrieve_turn_memory_lexical(session_id, content)?;
-        self.prepare_turn_with_memory(session_id, content, provider, remote_consent, memory)
+        self.prepare_turn_with_memory(
+            session_id,
+            content,
+            provider,
+            remote_consent,
+            provider_revision,
+            memory,
+        )
     }
 
     pub fn prepare_turn_with_memory(
@@ -649,6 +657,7 @@ impl Engine {
         content: &str,
         provider: ProviderKind,
         remote_consent: bool,
+        expected_provider_revision: i64,
         memory: TurnMemoryContext,
     ) -> Result<PreparedTurn, String> {
         let mut state = self.state()?;
@@ -658,7 +667,10 @@ impl Engine {
             .ok_or("Unlock your vault first.")?
             .provider_settings()
             .map_err(|error| error.to_string())?;
-        if provider != settings.provider || remote_consent != settings.remote_data_consent {
+        if provider != settings.provider
+            || remote_consent != settings.remote_data_consent
+            || expected_provider_revision != settings.revision
+        {
             return Err("Provider settings changed. Refresh settings before sending.".into());
         }
         authorize_provider(&state, &settings)?;
@@ -934,6 +946,27 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
+    fn begin_memory_work(&self, cancel: &CancellationToken) -> Result<String, String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() || state.memory_work.is_some() {
+            return Err("Wait for the current operation to finish, or stop it first.".into());
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        state.memory_work = Some(ActiveMemoryWork {
+            id: id.clone(),
+            cancel: cancel.clone(),
+        });
+        Ok(id)
+    }
+
+    fn finish_memory_work(&self, id: &str) {
+        if let Ok(mut state) = self.state() {
+            if state.memory_work.as_ref().is_some_and(|work| work.id == id) {
+                state.memory_work = None;
+            }
+        }
+    }
+
     fn retrieve_turn_memory_lexical(
         &self,
         session_id: &str,
@@ -1050,7 +1083,6 @@ impl Engine {
         if matching_work {
             state.memory_work = None;
         }
-        let embedding = embedding.map_err(|error| error.to_string())?;
         if !matching_work || cancel.is_cancelled() || state.vault_epoch != snapshot.0 {
             return Err("Remembered context retrieval was stopped.".into());
         }
@@ -1076,7 +1108,7 @@ impl Engine {
         let context = vault
             .retrieve_memory_context(
                 query,
-                &ContextBudget::conservative_fallback(1_200, 8).retrieval_options(Some(embedding)),
+                &ContextBudget::conservative_fallback(1_200, 8).retrieval_options(embedding.ok()),
             )
             .map_err(|error| error.to_string())?
             .context;
@@ -1160,6 +1192,21 @@ impl Engine {
         model: &str,
         cancel: &CancellationToken,
     ) -> Result<MemoryIndexStatus, String> {
+        let work_id = self.begin_memory_work(cancel)?;
+        let result = self
+            .rebuild_local_memory_embeddings_inner(base_url, model, cancel, &work_id)
+            .await;
+        self.finish_memory_work(&work_id);
+        result
+    }
+
+    async fn rebuild_local_memory_embeddings_inner(
+        &self,
+        base_url: &str,
+        model: &str,
+        cancel: &CancellationToken,
+        work_id: &str,
+    ) -> Result<MemoryIndexStatus, String> {
         const MAX_BATCH: usize = 256;
         let initial_vault_epoch = self.state()?.vault_epoch;
         self.rebuild_memory_index()?;
@@ -1183,6 +1230,32 @@ impl Engine {
             (state.vault_epoch, sources)
         };
         for source in sources {
+            let current = {
+                let state = self.state()?;
+                if state.vault_epoch != vault_epoch
+                    || cancel.is_cancelled()
+                    || !state
+                        .memory_work
+                        .as_ref()
+                        .is_some_and(|work| work.id == work_id)
+                {
+                    return Err("Memory search rebuild was stopped.".into());
+                }
+                if state.active.is_some() || state.notes_active.is_some() {
+                    return Err("Memory search rebuild was interrupted by active work.".into());
+                }
+                state
+                    .vault
+                    .as_ref()
+                    .ok_or("The vault was locked during memory search rebuild.")?
+                    .pending_embedding_sources(model, MAX_BATCH)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .any(|candidate| candidate == source)
+            };
+            if !current {
+                continue;
+            }
             let embedding =
                 embed_local_ollama_after_verification(base_url, model, &source.content, cancel)
                     .await
@@ -1191,7 +1264,7 @@ impl Engine {
             if state.vault_epoch != vault_epoch {
                 return Err("The vault changed during memory search rebuild.".into());
             }
-            if state.active.is_some() || state.notes_active.is_some() {
+            if state.active.is_some() || state.notes_active.is_some() || cancel.is_cancelled() {
                 return Err("Memory search rebuild was interrupted by active work.".into());
             }
             state
@@ -1212,7 +1285,13 @@ impl Engine {
         };
         if pending.is_empty() {
             let mut state = self.state()?;
-            if state.vault_epoch != vault_epoch {
+            if state.vault_epoch != vault_epoch
+                || cancel.is_cancelled()
+                || !state
+                    .memory_work
+                    .as_ref()
+                    .is_some_and(|work| work.id == work_id)
+            {
                 return Err("The vault changed during memory search rebuild.".into());
             }
             state
@@ -1231,11 +1310,23 @@ impl Engine {
         &self,
         cancel: &CancellationToken,
     ) -> Result<MemoryIndexStatus, String> {
+        let work_id = self.begin_memory_work(cancel)?;
+        let result = self
+            .update_configured_memory_embeddings_inner(cancel, &work_id)
+            .await;
+        self.finish_memory_work(&work_id);
+        result
+    }
+
+    async fn update_configured_memory_embeddings_inner(
+        &self,
+        cancel: &CancellationToken,
+        work_id: &str,
+    ) -> Result<MemoryIndexStatus, String> {
         const MAX_BATCH: usize = 32;
         let (vault_epoch, configuration, sources) = {
             let state = self.state()?;
-            if state.active.is_some() || state.notes_active.is_some() || state.memory_work.is_some()
-            {
+            if state.active.is_some() || state.notes_active.is_some() {
                 return Err("Memory search maintenance waits until Openmind is idle.".into());
             }
             let vault = state.vault.as_ref().ok_or("Unlock your vault first.")?;
@@ -1256,6 +1347,41 @@ impl Engine {
             .await
             .map_err(|error| error.to_string())?;
         for source in sources {
+            let current = {
+                let state = self.state()?;
+                if state.vault_epoch != vault_epoch
+                    || cancel.is_cancelled()
+                    || !state
+                        .memory_work
+                        .as_ref()
+                        .is_some_and(|work| work.id == work_id)
+                {
+                    return Err("Memory search maintenance was stopped.".into());
+                }
+                if state.active.is_some() || state.notes_active.is_some() {
+                    return Err("Memory search maintenance was interrupted by active work.".into());
+                }
+                let vault = state
+                    .vault
+                    .as_ref()
+                    .ok_or("The vault was locked during memory search maintenance.")?;
+                if vault
+                    .memory_embedding_configuration()
+                    .map_err(|error| error.to_string())?
+                    .as_ref()
+                    != Some(&configuration)
+                {
+                    return Err("Memory search configuration changed during maintenance.".into());
+                }
+                vault
+                    .pending_embedding_sources(&configuration.model, MAX_BATCH)
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .any(|candidate| candidate == source)
+            };
+            if !current {
+                continue;
+            }
             let embedding = embed_local_ollama_after_verification(
                 &configuration.base_url,
                 &configuration.model,
@@ -1268,8 +1394,7 @@ impl Engine {
             if state.vault_epoch != vault_epoch {
                 return Err("The vault changed during memory search update.".into());
             }
-            if state.active.is_some() || state.notes_active.is_some() || state.memory_work.is_some()
-            {
+            if state.active.is_some() || state.notes_active.is_some() || cancel.is_cancelled() {
                 return Err("Memory search maintenance was interrupted by active work.".into());
             }
             state
@@ -1284,7 +1409,7 @@ impl Engine {
 
     pub fn clear_memory_embedding_configuration(&self) -> Result<MemoryIndexStatus, String> {
         let mut state = self.state()?;
-        if state.active.is_some() || state.notes_active.is_some() {
+        if state.active.is_some() || state.notes_active.is_some() || state.memory_work.is_some() {
             return Err("Stop the current operation before changing memory search.".into());
         }
         let vault = state.vault.as_mut().ok_or("Unlock your vault first.")?;
@@ -1990,12 +2115,114 @@ mod tests {
                 "synthetic query",
                 ProviderKind::Ollama,
                 false,
+                engine.provider_settings().unwrap().revision,
                 memory,
             )
             .err()
             .expect("stale retrieval must be rejected");
         assert!(error.contains("Remembered context changed"));
         assert!(engine.list_messages(&session.id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_revision_change_after_retrieval_prevents_old_destination_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let defaults = engine.provider_settings().unwrap();
+        let first = engine
+            .update_provider_settings(
+                ProviderKind::OpenAiCompatible,
+                "https://synthetic-one.invalid",
+                "synthetic-model-one",
+                true,
+                defaults.revision,
+                Some("synthetic-old-key"),
+                false,
+            )
+            .unwrap();
+        let memory = engine
+            .retrieve_turn_memory(&session.id, "synthetic query")
+            .await
+            .unwrap();
+
+        engine
+            .update_provider_settings(
+                ProviderKind::OpenAiCompatible,
+                "https://synthetic-two.invalid",
+                "synthetic-model-two",
+                true,
+                first.revision,
+                Some("synthetic-new-key"),
+                false,
+            )
+            .unwrap();
+        let error = engine
+            .prepare_turn_with_memory(
+                &session.id,
+                "synthetic query",
+                ProviderKind::OpenAiCompatible,
+                true,
+                first.revision,
+                memory,
+            )
+            .err()
+            .expect("provider revision change must stop dispatch");
+        assert_eq!(
+            error,
+            "Provider settings changed. Refresh settings before sending."
+        );
+        assert!(engine.list_messages(&session.id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_embedding_provider_degrades_to_relevant_lexical_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        {
+            let mut state = engine.state().unwrap();
+            state
+                .vault
+                .as_mut()
+                .unwrap()
+                .activate_memory_embedding_configuration(
+                    "http://127.0.0.1:1",
+                    "synthetic-unavailable-model",
+                )
+                .unwrap();
+        }
+        let session = engine.create_session().unwrap();
+        let finished = complete_turn(&engine, &session.id);
+        let notes = finished.notes.unwrap().unwrap();
+        engine
+            .finish_notes(&notes.attempt_id, Some(&synthetic_patch()))
+            .unwrap();
+
+        let memory = engine
+            .retrieve_turn_memory(&session.id, "synthetic walk")
+            .await
+            .expect("lexical fallback");
+        assert!(memory.context.contains("Take a synthetic walk"));
+    }
+
+    #[test]
+    fn lock_and_cancel_stop_registered_memory_model_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let cancel = CancellationToken::new();
+        let work_id = engine.begin_memory_work(&cancel).unwrap();
+
+        engine.cancel_turn().unwrap();
+        assert!(cancel.is_cancelled());
+        engine.finish_memory_work(&work_id);
+
+        let lock_cancel = CancellationToken::new();
+        engine.begin_memory_work(&lock_cancel).unwrap();
+        engine.lock().unwrap();
+        assert!(lock_cancel.is_cancelled());
     }
 
     #[test]

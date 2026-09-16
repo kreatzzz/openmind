@@ -73,6 +73,7 @@ struct Connection {
     base_url: String,
     model: String,
     remote_consent: bool,
+    revision: i64,
     api_key: Option<Zeroizing<String>>,
 }
 
@@ -84,6 +85,7 @@ fn saved_connection(engine: &Engine) -> Result<Connection, String> {
         base_url: settings.base_url,
         model: settings.model,
         remote_consent: settings.remote_data_consent,
+        revision: settings.revision,
         api_key,
     })
 }
@@ -95,6 +97,7 @@ fn job_connection(engine: &Engine, message_id: &str) -> Result<Connection, Strin
         base_url: settings.base_url,
         model: settings.model,
         remote_consent: settings.remote_data_consent,
+        revision: settings.revision,
         api_key: engine.provider_api_key()?,
     })
 }
@@ -765,6 +768,7 @@ async fn send_message(
             &prepare_content,
             provider,
             remote_consent,
+            connection.revision,
             memory,
         )
     })
