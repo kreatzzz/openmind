@@ -2298,4 +2298,64 @@ mod tests {
             .unwrap();
         assert_eq!(engine.list_notes().unwrap().len(), 1);
     }
+
+    #[test]
+    fn notes_retry_limit_is_bounded_and_reply_remains_complete() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let turn = engine
+            .prepare_turn(&session.id, "I want to take a short walk.")
+            .unwrap();
+        engine
+            .append_chunk(&turn.assistant.id, "That sounds concrete.")
+            .unwrap();
+        engine
+            .finish_turn(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap();
+        for _ in 0..3 {
+            let attempt = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
+            assert_eq!(
+                engine.finish_notes(&attempt.attempt_id, None).unwrap(),
+                Some(NotesStatus::Failed)
+            );
+        }
+        let error = match engine.prepare_notes(&turn.assistant.id) {
+            Err(error) => error,
+            Ok(_) => panic!("retry limit should reject another attempt"),
+        };
+        assert!(error.contains("retry limit"));
+        let messages = engine.list_messages(&session.id).unwrap();
+        assert_eq!(messages[1].status, MessageStatus::Complete);
+        assert_eq!(messages[1].content, "That sounds concrete.");
+        let job = engine.list_note_jobs().unwrap().remove(0);
+        assert_eq!(job.attempt_count, 3);
+        assert_eq!(job.status, "failed");
+    }
+
+    #[test]
+    fn notes_channel_failure_path_cannot_undo_saved_reply() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let turn = engine
+            .prepare_turn(&session.id, "I plan to read tonight.")
+            .unwrap();
+        engine
+            .append_chunk(&turn.assistant.id, "What will you read?")
+            .unwrap();
+        let finished = engine
+            .finish_turn_and_prepare_notes(&turn.assistant.id, MessageStatus::Complete)
+            .unwrap()
+            .unwrap();
+        let notes = finished.notes.unwrap().unwrap();
+        // `execute_notes` takes this path if its renderer channel closes before
+        // the Updating event can be delivered.
+        engine.finish_notes(&notes.attempt_id, None).unwrap();
+        let saved = engine.list_messages(&session.id).unwrap();
+        assert_eq!(saved[1].status, MessageStatus::Complete);
+        assert_eq!(saved[1].content, "What will you read?");
+    }
 }

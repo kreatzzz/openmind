@@ -337,6 +337,26 @@ mod tests {
         (format!("http://{address}/v1"), task)
     }
 
+    async fn mock_status(
+        status: &'static str,
+        headers: &'static str,
+        body: &'static str,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 8 * 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}/v1")
+    }
+
     #[test]
     fn remote_endpoints_require_tls_but_loopback_can_be_http() {
         assert!(Endpoint::parse("https://api.example.test/v1").is_ok());
@@ -347,6 +367,14 @@ mod tests {
         );
         assert!(Endpoint::parse("https://user:secret@example.test/v1").is_err());
         assert!(Endpoint::parse("https://example.test/unexpected").is_err());
+        assert_eq!(
+            Endpoint::parse("https://example.test/v1?next=http://127.0.0.1").err(),
+            Some(ProviderError::BaseUrlQuery)
+        );
+        assert_eq!(
+            Endpoint::parse("https://example.test/v1#fragment").err(),
+            Some(ProviderError::BaseUrlQuery)
+        );
     }
 
     #[tokio::test]
@@ -400,5 +428,34 @@ mod tests {
         let request = request.await.unwrap();
         assert!(request.contains("\\\"strict\\\":true") || request.contains("\"strict\":true"));
         assert!(request.contains("json_schema"));
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed_and_error_text_never_contains_secrets() {
+        let redirect = mock_status(
+            "302 Found",
+            "Location: http://127.0.0.1:9/v1/models\r\n",
+            "synthetic-secret-in-body",
+        )
+        .await;
+        let error = health(&redirect, "synthetic-key", CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error, ProviderError::HttpStatus(302));
+        let message = error.to_string();
+        assert!(!message.contains("synthetic-key"));
+        assert!(!message.contains("synthetic-secret-in-body"));
+
+        let rejected = mock_status(
+            "401 Unauthorized",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"synthetic-key was rejected"}}"#,
+        )
+        .await;
+        let error = health(&rejected, "synthetic-key", CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error, ProviderError::CredentialRejected);
+        assert!(!error.to_string().contains("synthetic-key"));
     }
 }

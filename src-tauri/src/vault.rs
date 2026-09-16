@@ -403,6 +403,30 @@ impl Vault {
             ));
         }
         let transaction = self.connection.transaction()?;
+        let existing: (String, String, String, i64, Option<String>) = transaction
+            .query_row(
+                "SELECT provider, base_url, model, remote_data_consent, api_key
+             FROM provider_settings WHERE id=1 AND revision=?1",
+                [expected_revision],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(VaultError::RevisionConflict)?;
+        let credential_changed = (clear_api_key && existing.4.is_some())
+            || api_key.is_some_and(|candidate| existing.4.as_deref() != Some(candidate));
+        let connection_changed = existing.0 != provider.as_db_value()
+            || existing.1 != base_url
+            || existing.2 != model
+            || db_bool(existing.3)? != remote_data_consent
+            || credential_changed;
         let changed = if clear_api_key {
             transaction.execute(
                 "UPDATE provider_settings SET provider=?1, base_url=?2, model=?3,
@@ -446,6 +470,19 @@ impl Vault {
         };
         if changed != 1 {
             return Err(VaultError::RevisionConflict);
+        }
+        if connection_changed {
+            // Queued remote work retains its content/provider snapshot, but
+            // credentials are intentionally not duplicated per job. Revoke
+            // old jobs on every connection or credential change so a current
+            // key can never be sent to a stale endpoint.
+            transaction.execute(
+                "UPDATE notes_jobs SET remote_data_consent=0,
+                        last_error_code='provider_settings_changed', updated_at=?1
+                 WHERE provider IN ('codex', 'openai_compatible')
+                   AND status IN ('pending', 'failed')",
+                [now_rfc3339()],
+            )?;
         }
         transaction.commit()?;
         self.provider_settings()
@@ -4605,6 +4642,113 @@ mod tests {
         assert_eq!(reading.line_width, LineWidth::Wide);
         assert!(reading.reduce_motion);
         assert!(!reading.enter_to_send);
+    }
+
+    #[test]
+    fn revoking_remote_consent_revokes_queued_job_snapshot() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let defaults = vault.provider_settings().unwrap();
+        let enabled = vault
+            .update_provider_settings(
+                ProviderKind::OpenAiCompatible,
+                "https://provider.example.test/v1",
+                "synthetic-model",
+                true,
+                defaults.revision,
+                Some("synthetic-secret"),
+                false,
+            )
+            .unwrap();
+        let session = vault.create_session().unwrap();
+        let (_, assistant) = finish_synthetic_turn(
+            &mut vault,
+            &session.id,
+            "I want to call a friend this weekend.",
+        );
+        vault
+            .set_notes_job_provider(
+                &assistant.id,
+                ProviderKind::OpenAiCompatible,
+                &enabled.base_url,
+                &enabled.model,
+                true,
+            )
+            .unwrap();
+        assert!(
+            vault
+                .notes_provider_settings(&assistant.id)
+                .unwrap()
+                .remote_data_consent
+        );
+
+        vault
+            .update_provider_settings(
+                ProviderKind::OpenAiCompatible,
+                &enabled.base_url,
+                &enabled.model,
+                false,
+                enabled.revision,
+                None,
+                false,
+            )
+            .unwrap();
+        let queued = vault.notes_provider_settings(&assistant.id).unwrap();
+        assert!(!queued.remote_data_consent);
+        let job = vault.list_note_jobs().unwrap().remove(0);
+        assert_eq!(
+            job.last_error_code.as_deref(),
+            Some("provider_settings_changed")
+        );
+    }
+
+    #[test]
+    fn changing_remote_endpoint_or_credential_revokes_old_jobs() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").unwrap();
+        let defaults = vault.provider_settings().unwrap();
+        let enabled = vault
+            .update_provider_settings(
+                ProviderKind::OpenAiCompatible,
+                "https://first.example.test/v1",
+                "synthetic-model",
+                true,
+                defaults.revision,
+                Some("first-synthetic-key"),
+                false,
+            )
+            .unwrap();
+        let session = vault.create_session().unwrap();
+        let (_, assistant) =
+            finish_synthetic_turn(&mut vault, &session.id, "I plan to write tomorrow.");
+        vault
+            .set_notes_job_provider(
+                &assistant.id,
+                ProviderKind::OpenAiCompatible,
+                &enabled.base_url,
+                &enabled.model,
+                true,
+            )
+            .unwrap();
+
+        vault
+            .update_provider_settings(
+                ProviderKind::OpenAiCompatible,
+                "https://second.example.test/v1",
+                "synthetic-model",
+                true,
+                enabled.revision,
+                Some("second-synthetic-key"),
+                false,
+            )
+            .unwrap();
+        let old = vault.notes_provider_settings(&assistant.id).unwrap();
+        assert_eq!(old.base_url, "https://first.example.test/v1");
+        assert!(!old.remote_data_consent);
+        assert_eq!(
+            vault.provider_api_key().unwrap().unwrap().as_str(),
+            "second-synthetic-key"
+        );
     }
 
     #[test]

@@ -286,13 +286,11 @@ async fn discover_executable() -> Result<PathBuf, ProviderError> {
     }
     if cfg!(windows) {
         if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            candidates.push(
-                PathBuf::from(local_app_data)
-                    .join("OpenAI")
-                    .join("Codex")
-                    .join("bin")
-                    .join(executable_name),
-            );
+            let official_bin = PathBuf::from(local_app_data)
+                .join("OpenAI")
+                .join("Codex")
+                .join("bin");
+            add_official_windows_candidates(&mut candidates, &official_bin, executable_name);
         }
     } else if cfg!(target_os = "macos") {
         candidates.push(PathBuf::from(
@@ -346,6 +344,32 @@ async fn discover_executable() -> Result<PathBuf, ProviderError> {
     } else {
         Err(ProviderError::CodexUnavailable)
     }
+}
+
+fn add_official_windows_candidates(
+    candidates: &mut Vec<PathBuf>,
+    official_bin: &std::path::Path,
+    executable_name: &str,
+) {
+    candidates.push(official_bin.join(executable_name));
+    let Ok(entries) = std::fs::read_dir(official_bin) else {
+        return;
+    };
+    let mut versioned = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(|kind| kind.is_dir())
+                .map(|_| entry.path())
+        })
+        .take(32)
+        .map(|directory| directory.join(executable_name))
+        .collect::<Vec<_>>();
+    versioned.sort();
+    versioned.reverse();
+    candidates.extend(versioned);
 }
 
 fn supported_version(output: &str) -> bool {
@@ -667,6 +691,21 @@ mod tests {
         assert!(supported_version("codex-cli 0.154.0-alpha.6.2"));
         assert!(supported_version("codex 1.0.0"));
         assert!(!supported_version("unknown"));
+    }
+
+    #[test]
+    fn official_windows_discovery_is_bounded_to_direct_bin_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(bin.join("version-a").join("nested")).unwrap();
+        std::fs::create_dir_all(bin.join("version-b")).unwrap();
+        let mut candidates = Vec::new();
+        add_official_windows_candidates(&mut candidates, &bin, "codex.exe");
+        assert!(candidates.contains(&bin.join("codex.exe")));
+        assert!(candidates.contains(&bin.join("version-a").join("codex.exe")));
+        assert!(candidates.contains(&bin.join("version-b").join("codex.exe")));
+        assert!(!candidates.contains(&bin.join("version-a").join("nested").join("codex.exe")));
+        assert!(candidates.len() <= 33);
     }
 
     #[test]
