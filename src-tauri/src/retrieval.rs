@@ -387,19 +387,36 @@ pub async fn embed_local_ollama(
     input: &str,
     cancel: &CancellationToken,
 ) -> Result<QueryEmbedding, EmbeddingError> {
-    verify_local_ollama_model(base_url, model).await?;
+    verify_local_ollama_model_with_cancel(base_url, model, cancel).await?;
     embed_local_ollama_after_verification(base_url, model, input, cancel).await
 }
 
 /// Inspect Ollama's local model inventory without running or downloading a
 /// model. Models filtered as cloud-backed by the provider layer are rejected.
 pub async fn verify_local_ollama_model(base_url: &str, model: &str) -> Result<(), EmbeddingError> {
+    verify_local_ollama_model_with_cancel(base_url, model, &CancellationToken::new()).await
+}
+
+/// Inspect the local inventory while allowing the owning operation to stop a
+/// stalled request. The compatibility wrapper above remains available to
+/// callers without an operation-scoped cancellation token.
+pub async fn verify_local_ollama_model_with_cancel(
+    base_url: &str,
+    model: &str,
+    cancel: &CancellationToken,
+) -> Result<(), EmbeddingError> {
     if model.trim().is_empty() || model.len() > 256 {
         return Err(EmbeddingError::InvalidInput);
     }
-    let models = crate::provider::list_models(base_url)
-        .await
-        .map_err(|_| EmbeddingError::Network)?;
+    if cancel.is_cancelled() {
+        return Err(EmbeddingError::Cancelled);
+    }
+    let models = tokio::select! {
+        _ = cancel.cancelled() => return Err(EmbeddingError::Cancelled),
+        models = crate::provider::list_models(base_url) => {
+            models.map_err(|_| EmbeddingError::Network)?
+        }
+    };
     models
         .iter()
         .any(|candidate| candidate.name == model)
@@ -539,7 +556,37 @@ fn local_api_url(base_url: &str, path: &str) -> Result<Url, EmbeddingError> {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+
+    async fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 2 * 1024];
+            let bytes = stream.read(&mut chunk).await.expect("read request");
+            assert!(bytes > 0, "fixture client closed before finishing request");
+            request.extend_from_slice(&chunk[..bytes]);
+            assert!(request.len() <= 64 * 1024, "fixture request is too large");
+
+            let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let body_start = header_end + 4;
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("content length"))
+                    })
+                })
+                .unwrap_or(0);
+            if request.len() >= body_start + content_length {
+                return String::from_utf8(request).expect("utf8 request");
+            }
+        }
+    }
 
     #[test]
     fn fts_query_treats_syntax_as_plain_terms_and_preserves_negation() {
@@ -606,9 +653,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             for request_index in 0..2 {
                 let (mut stream, _) = listener.accept().await.expect("accept request");
-                let mut request = vec![0_u8; 8 * 1024];
-                let bytes = stream.read(&mut request).await.expect("read request");
-                let request = String::from_utf8(request[..bytes].to_vec()).expect("utf8 request");
+                let request = read_http_request(&mut stream).await;
                 let body: &[u8] = if request_index == 0 {
                     assert!(request.starts_with("GET /api/tags HTTP/1.1"));
                     br#"{"models":[{"name":"synthetic-embed","size":42}]}"#
@@ -650,22 +695,25 @@ mod tests {
             .await
             .expect("bind local fixture");
         let address = listener.local_addr().expect("fixture address");
+        let (headers_tx, headers_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept request");
-            let mut request = vec![0_u8; 2 * 1024];
-            stream.read(&mut request).await.expect("read request");
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("POST /api/embed HTTP/1.1"));
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 128\r\n\r\n",
                 )
                 .await
                 .expect("write headers");
+            headers_tx.send(()).expect("signal flushed headers");
             tokio::time::sleep(Duration::from_secs(5)).await;
         });
         let cancel = CancellationToken::new();
         let trigger = cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            headers_rx.await.expect("headers sent");
+            tokio::task::yield_now().await;
             trigger.cancel();
         });
 
@@ -688,8 +736,8 @@ mod tests {
         let address = listener.local_addr().expect("fixture address");
         let handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept request");
-            let mut request = vec![0_u8; 2 * 1024];
-            stream.read(&mut request).await.expect("read request");
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("POST /api/embed HTTP/1.1"));
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
                 MAX_EMBED_RESPONSE_BYTES + 1
@@ -710,5 +758,79 @@ mod tests {
         .await;
         assert_eq!(result, Err(EmbeddingError::ResponseTooLarge));
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn public_embedding_honors_cancellation_during_model_inventory() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let (headers_tx, headers_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("GET /api/tags HTTP/1.1"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 128\r\n\r\n",
+                )
+                .await
+                .expect("write headers");
+            headers_tx.send(()).expect("signal flushed headers");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            headers_rx.await.expect("inventory headers sent");
+            trigger.cancel();
+        });
+
+        let result = embed_local_ollama(
+            &format!("http://{address}"),
+            "synthetic-embed",
+            "query text",
+            &cancel,
+        )
+        .await;
+        assert_eq!(result, Err(EmbeddingError::Cancelled));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn embedding_body_rejects_streamed_oversize_without_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let request = read_http_request(&mut stream).await;
+            assert!(request.starts_with("POST /api/embed HTTP/1.1"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n",
+                )
+                .await
+                .expect("write headers");
+            let body = vec![b'x'; MAX_EMBED_RESPONSE_BYTES + 1];
+            stream
+                .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                .await
+                .expect("write chunk size");
+            let _ = stream.write_all(&body).await;
+            let _ = stream.write_all(b"\r\n0\r\n\r\n").await;
+        });
+
+        let result = embed_local_ollama_after_verification(
+            &format!("http://{address}"),
+            "synthetic-embed",
+            "query text",
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result, Err(EmbeddingError::ResponseTooLarge));
+        handle.await.expect("fixture task");
     }
 }

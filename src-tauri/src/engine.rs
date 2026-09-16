@@ -15,9 +15,9 @@ use crate::{
     models::{Message, MessageRole, MessageStatus, Session},
     notes::{MemoryRecord, NotePatch, NotesInput, UserNote},
     retrieval::{
-        embed_local_ollama, embed_local_ollama_after_verification, verify_local_ollama_model,
-        ContextBudget, EmbeddingConfiguration, MemoryIndexStatus, RetrievalOptions,
-        RetrievalResult,
+        embed_local_ollama, embed_local_ollama_after_verification,
+        verify_local_ollama_model_with_cancel, ContextBudget, EmbeddingConfiguration,
+        MemoryIndexStatus, RetrievalOptions, RetrievalResult,
     },
     vault::Vault,
 };
@@ -1210,7 +1210,7 @@ impl Engine {
         const MAX_BATCH: usize = 256;
         let initial_vault_epoch = self.state()?.vault_epoch;
         self.rebuild_memory_index()?;
-        verify_local_ollama_model(base_url, model)
+        verify_local_ollama_model_with_cancel(base_url, model, cancel)
             .await
             .map_err(|error| error.to_string())?;
         let (vault_epoch, sources) = {
@@ -1343,9 +1343,13 @@ impl Engine {
                 .map_err(|error| error.to_string())?;
             (state.vault_epoch, configuration, sources)
         };
-        verify_local_ollama_model(&configuration.base_url, &configuration.model)
-            .await
-            .map_err(|error| error.to_string())?;
+        verify_local_ollama_model_with_cancel(
+            &configuration.base_url,
+            &configuration.model,
+            cancel,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         for source in sources {
             let current = {
                 let state = self.state()?;
