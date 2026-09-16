@@ -4,6 +4,11 @@ import {
   ArrowRight,
   ArrowUp,
   Brain,
+  CalendarDays,
+  House,
+  Palette,
+  Shield,
+  Plug,
   BookOpen,
   Check,
   ChevronRight,
@@ -25,6 +30,14 @@ import { WelcomeScreen } from "./components/WelcomeScreen";
 import { Notebook } from "./components/Notebook";
 import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { Transcript } from "./components/Transcript";
+import { HomeWorkspace } from "./components/HomeWorkspace";
+import { PlannedSessions } from "./components/PlannedSessions";
+import { PrivacySettings } from "./components/PrivacySettings";
+import { RestoreWorkspace } from "./components/RestoreWorkspace";
+import {
+  AppearanceSettings,
+  COLOR_THEMES,
+} from "./components/AppearanceSettings";
 import {
   desktop,
   isDesktop,
@@ -131,6 +144,30 @@ export default function App() {
   const [passphrase, setPassphrase] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [settings, setSettings] = useState(false);
+  const [settingsPage, setSettingsPage] = useState<
+    "connection" | "appearance" | "privacy" | "memory"
+  >("appearance");
+  const [restoreOpen, setRestoreOpen] = useState(false);
+  const [home, setHome] = useState(true);
+  const [plansOpen, setPlansOpen] = useState(false);
+  const [colorTheme, setColorTheme] = useState(() => {
+    try {
+      const value = localStorage.getItem("openmind.color.v1");
+      return COLOR_THEMES.some((theme) => theme.id === value)
+        ? value!
+        : "graphite";
+    } catch {
+      return "graphite";
+    }
+  });
+  useEffect(() => {
+    document.documentElement.dataset.color = colorTheme;
+    try {
+      localStorage.setItem("openmind.color.v1", colorTheme);
+    } catch {
+      /* Appearance works without storage. */
+    }
+  }, [colorTheme]);
   const [conversationControls, setConversationControls] = useState(false);
   const [notes, setNotes] = useState(false);
   const [memoryView, setMemoryView] = useState(false);
@@ -405,6 +442,7 @@ export default function App() {
     setScreen(isDesktop ? "setup" : "browser");
   }
   async function selectSession(id: string) {
+    setHome(false);
     rememberCurrentDraft();
     setNotes(false);
     setMemoryView(false);
@@ -434,6 +472,7 @@ export default function App() {
     }
   }
   async function newSession() {
+    setHome(false);
     if (sending || busy) return;
     rememberCurrentDraft();
     const request = ++generation.current;
@@ -987,17 +1026,49 @@ export default function App() {
         <Mark />
         <span>Openmind</span>
       </div>
-      <div className="rail-topline">
-        {isDemo ? "Demo workspace" : "Personal workspace"}
-      </div>
+      <div className="rail-topline">Personal workspace</div>
       <button
         className="new-conversation"
-        onClick={sample ? exitSample : newSession}
+        onClick={
+          sample
+            ? () => {
+                setHome(false);
+                setNotes(false);
+                setMemoryView(false);
+                setSettings(true);
+              }
+            : newSession
+        }
         disabled={sending || busy}
       >
-        {sample ? <ArrowRight size={17} /> : <Plus size={18} />}
-        {sample ? "Close demo" : "New conversation"}
+        <Plus size={18} />
+        New conversation
       </button>
+      <div className="workspace-navigation">
+        <button
+          className={`rail-action ${home ? "rail-action-selected" : ""}`}
+          onClick={() => {
+            setHome(true);
+            setNotes(false);
+            setMemoryView(false);
+            setDrawer(false);
+          }}
+          aria-current={home ? "page" : undefined}
+        >
+          <House size={17} />
+          Overview
+        </button>
+        <button
+          className="rail-action"
+          onClick={() => {
+            setPlansOpen(true);
+            setDrawer(false);
+          }}
+        >
+          <CalendarDays size={17} />
+          Planned sessions
+        </button>
+      </div>
       <div className="session-search">
         <Search size={15} />
         <input
@@ -1020,9 +1091,9 @@ export default function App() {
               <button
                 key={item.id}
                 onClick={() => void selectSession(item.id)}
-                className={`session-item ${selected === item.id && !notes && !memoryView ? "selected" : ""}`}
+                className={`session-item ${selected === item.id && !notes && !memoryView && !home ? "selected" : ""}`}
                 aria-current={
-                  selected === item.id && !notes && !memoryView
+                  selected === item.id && !notes && !memoryView && !home
                     ? "page"
                     : undefined
                 }
@@ -1050,6 +1121,7 @@ export default function App() {
         <button
           className={`rail-action ${memoryView ? "rail-action-selected" : ""}`}
           onClick={() => {
+            setHome(false);
             setMemoryView(true);
             setNotes(false);
             setDrawer(false);
@@ -1066,6 +1138,7 @@ export default function App() {
         <button
           className={`rail-action ${notes ? "rail-action-selected" : ""}`}
           onClick={() => {
+            setHome(false);
             setNotes(true);
             setMemoryView(false);
             setDrawer(false);
@@ -1091,7 +1164,7 @@ export default function App() {
         {sample ? (
           <button className="rail-action" onClick={exitSample}>
             <LockKeyhole size={17} />
-            Close demo
+            Leave workspace
           </button>
         ) : (
           <button
@@ -1105,7 +1178,7 @@ export default function App() {
         )}
         <div className="rail-footnote">
           <span className="status-dot" />
-          {isDemo ? "Demo · synthetic data only" : "Stored on this device"}
+          {sample ? "Browser workspace" : "Encrypted on this device"}
         </div>
       </div>
     </>
@@ -1132,11 +1205,13 @@ export default function App() {
                   <Menu size={20} />
                 </button>
                 <span className="header-section">
-                  {memoryView
-                    ? "Remembered context"
-                    : notes
-                      ? "Your notes"
-                      : "Conversation"}
+                  {home
+                    ? "Overview"
+                    : memoryView
+                      ? "Remembered context"
+                      : notes
+                        ? "Your notes"
+                        : "Conversation"}
                 </span>
                 <span className="header-slash" aria-hidden="true">
                   /
@@ -1150,8 +1225,18 @@ export default function App() {
                 </span>
               </div>
               <div className="header-actions">
-                <span className="preview-badge">Engineering preview</span>
-                {!notes && !memoryView && session && (
+                <button
+                  className="workspace-status"
+                  onClick={() => setSettings(true)}
+                >
+                  <span className="status-dot" />
+                  {sample
+                    ? "Browser"
+                    : connected
+                      ? model || "Connected"
+                      : "Connect a model"}
+                </button>
+                {!home && !notes && !memoryView && session && (
                   <button
                     className="icon-button"
                     aria-label="Conversation controls"
@@ -1161,7 +1246,7 @@ export default function App() {
                     <SlidersHorizontal size={16} />
                   </button>
                 )}
-                {!notes && !memoryView && selected && !sample && (
+                {!home && !notes && !memoryView && selected && !sample && (
                   <button
                     className="icon-button"
                     aria-label="Delete conversation"
@@ -1176,15 +1261,8 @@ export default function App() {
                 )}
               </div>
             </header>
-            {isDemo && (
-              <div className="sample-banner" role="note">
-                <span>Demo workspace · Synthetic data only</span>
-                <button onClick={sample ? exitSample : lock}>
-                  Close demo <ArrowRight size={14} />
-                </button>
-              </div>
-            )}
-            {!notes &&
+            {!home &&
+              !notes &&
               !memoryView &&
               session &&
               (!sessionMemoryEnabled || !sessionNotesEnabled) && (
@@ -1205,7 +1283,35 @@ export default function App() {
                   </button>
                 </div>
               )}
-            {memoryView ? (
+            {home ? (
+              <HomeWorkspace
+                sessions={sessions}
+                notes={userNotes}
+                memories={memories}
+                disabled={busy || sending}
+                sample={sample}
+                onNew={
+                  sample
+                    ? () => {
+                        setHome(false);
+                        setSettings(true);
+                      }
+                    : newSession
+                }
+                onSession={(id) => void selectSession(id)}
+                onNotes={() => {
+                  setHome(false);
+                  setNotes(true);
+                  setMemoryView(false);
+                }}
+                onMemory={() => {
+                  setHome(false);
+                  setMemoryView(true);
+                  setNotes(false);
+                }}
+                onPlans={() => setPlansOpen(true)}
+              />
+            ) : memoryView ? (
               <MemoryWorkspace
                 memories={memories}
                 notes={userNotes}
@@ -1331,7 +1437,7 @@ export default function App() {
                           notes.
                         </span>
                         <button className="text-button" onClick={exitSample}>
-                          Close demo <ArrowRight size={16} />
+                          Leave workspace <ArrowRight size={16} />
                         </button>
                       </div>
                     ) : (
@@ -1423,7 +1529,7 @@ export default function App() {
                     <div className="composer-footnote">
                       <span>
                         {sample ? (
-                          "Browser demo · No inference or storage"
+                          "Example conversation · not saved"
                         ) : connected ? (
                           <>
                             <span className="status-dot" />{" "}
@@ -1464,6 +1570,7 @@ export default function App() {
           onConfirmationChange={setConfirmation}
           onExploreSample={exploreSample}
           onUnlock={unlock}
+          onRestore={isDesktop ? () => setRestoreOpen(true) : undefined}
         />
       )}
       {deleteConversation && (
@@ -1512,175 +1619,278 @@ export default function App() {
         />
       )}
       {settings && (
-        <Dialog title="Settings" onClose={() => setSettings(false)}>
-          <div className="settings-section">
-            <div className="eyebrow">MODEL CONNECTION</div>
-            <label htmlFor="provider">Provider</label>
-            <select
-              id="provider"
-              value={provider}
-              disabled={sample || sending}
-              onChange={(event) =>
-                changeProvider(
-                  event.target.value === "codex" && isDemo && !sample
-                    ? "codex"
-                    : "ollama",
-                )
-              }
-            >
-              <option value="ollama">Local Ollama</option>
-              {isDemo && !sample && (
-                <option value="codex">ChatGPT via Codex</option>
-              )}
-            </select>
-            {provider === "codex" ? (
-              <>
-                <h3>ChatGPT via Codex · Online</h3>
-                <p>
-                  Uses the ChatGPT account signed in to Codex on this device.
-                  Subscription limits apply. Available for synthetic demo
-                  testing only.
-                </p>
-                <p>
-                  This sends demo messages, recent conversation context,
-                  internal memory, and the source for note updates to OpenAI.
-                </p>
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={remoteConsent}
-                    disabled={sending}
-                    onChange={(event) => setRemoteConsent(event.target.checked)}
-                  />
-                  I agree to send this demo context to OpenAI.
-                </label>
-                <p className="field-hint">
-                  If signed out, run <code>codex login</code> in a terminal,
-                  then check the connection.
-                </p>
-              </>
-            ) : (
-              <>
-                <h3>Ollama on loopback</h3>
-                <p>Model execution location unverified.</p>
-                <p>
-                  Messages are sent to the configured Ollama endpoint. Only
-                  loopback addresses are supported in this prototype. Ollama may
-                  have its own logging and network settings.
-                </p>
-                <label htmlFor="endpoint">Local endpoint</label>
-                <input
-                  id="endpoint"
-                  value={baseUrl}
-                  disabled={sample || discovering}
-                  onChange={(event) => {
-                    connectionGeneration.current++;
-                    setBaseUrl(event.target.value);
-                    setConnected(false);
-                    setModels([]);
-                    setModel("");
-                    setConnectionError("");
-                  }}
-                  spellCheck={false}
-                />
-              </>
-            )}
-            <button
-              className="secondary-button"
-              onClick={discoverModels}
-              disabled={sample || discovering}
-            >
-              {discovering ? (
-                "Checking connection…"
-              ) : connected ? (
-                <>
-                  <Check size={16} /> Check again
-                </>
-              ) : (
-                "Check connection"
-              )}
-            </button>
-            {sample && (
-              <p className="field-hint">
-                Model connections are available in the desktop app. The sample
-                does not send messages.
-              </p>
-            )}
-            {connectionError && (
-              <div className="inline-error" role="alert">
-                <CircleAlert size={17} />
-                <span>{connectionError}</span>
-              </div>
-            )}
-            {models.length > 0 && (
-              <>
-                <label htmlFor="model">Model</label>
-                <select
-                  id="model"
-                  value={model}
-                  onChange={(event) => setModel(event.target.value)}
-                >
-                  {models.map((item) => (
-                    <option key={item.name} value={item.name}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
-                <div className="connection-success">
-                  <Check size={15} />{" "}
-                  {provider === "codex"
-                    ? "ChatGPT via Codex is ready"
-                    : "Ollama is ready"}
+        <Dialog
+          title="Settings"
+          className="settings-dialog"
+          onClose={() => setSettings(false)}
+        >
+          <div className="settings-layout">
+            <nav className="settings-navigation" aria-label="Settings sections">
+              <button
+                aria-current={
+                  settingsPage === "appearance" ? "page" : undefined
+                }
+                onClick={() => setSettingsPage("appearance")}
+              >
+                <Palette size={16} />
+                Appearance
+              </button>
+              <button
+                aria-current={
+                  settingsPage === "connection" ? "page" : undefined
+                }
+                onClick={() => setSettingsPage("connection")}
+              >
+                <Plug size={16} />
+                Model connection
+              </button>
+              <button
+                aria-current={settingsPage === "privacy" ? "page" : undefined}
+                onClick={() => setSettingsPage("privacy")}
+              >
+                <Shield size={16} />
+                Privacy & storage
+              </button>
+              <button
+                aria-current={settingsPage === "memory" ? "page" : undefined}
+                onClick={() => setSettingsPage("memory")}
+              >
+                <Brain size={16} />
+                Memory & notes
+              </button>
+            </nav>
+            <div className="settings-content">
+              {settingsPage === "connection" && (
+                <div className="settings-section">
+                  <div className="eyebrow">MODEL CONNECTION</div>
+                  <label htmlFor="provider">Provider</label>
+                  <select
+                    id="provider"
+                    value={provider}
+                    disabled={sample || sending}
+                    onChange={(event) =>
+                      changeProvider(
+                        event.target.value === "codex" && isDemo && !sample
+                          ? "codex"
+                          : "ollama",
+                      )
+                    }
+                  >
+                    <option value="ollama">Local Ollama</option>
+                    {isDemo && !sample && (
+                      <option value="codex">ChatGPT via Codex</option>
+                    )}
+                  </select>
+                  {provider === "codex" ? (
+                    <>
+                      <h3>ChatGPT via Codex · Online</h3>
+                      <p>
+                        Uses the ChatGPT account signed in to Codex on this
+                        device. Subscription limits apply. Available in the
+                        example workspace.
+                      </p>
+                      <p>
+                        This sends example messages, recent conversation
+                        context, internal memory, and the source for note
+                        updates to OpenAI.
+                      </p>
+                      <label className="checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={remoteConsent}
+                          disabled={sending}
+                          onChange={(event) =>
+                            setRemoteConsent(event.target.checked)
+                          }
+                        />
+                        I agree to send this context to OpenAI.
+                      </label>
+                      <p className="field-hint">
+                        If signed out, run <code>codex login</code> in a
+                        terminal, then check the connection.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <h3>Ollama on loopback</h3>
+                      <p>Model execution location unverified.</p>
+                      <p>
+                        Messages are sent to the configured Ollama endpoint.
+                        Only loopback addresses are supported in this prototype.
+                        Ollama may have its own logging and network settings.
+                      </p>
+                      <label htmlFor="endpoint">Local endpoint</label>
+                      <input
+                        id="endpoint"
+                        value={baseUrl}
+                        disabled={sample || discovering}
+                        onChange={(event) => {
+                          connectionGeneration.current++;
+                          setBaseUrl(event.target.value);
+                          setConnected(false);
+                          setModels([]);
+                          setModel("");
+                          setConnectionError("");
+                        }}
+                        spellCheck={false}
+                      />
+                    </>
+                  )}
+                  <button
+                    className="secondary-button"
+                    onClick={discoverModels}
+                    disabled={sample || discovering}
+                  >
+                    {discovering ? (
+                      "Checking connection…"
+                    ) : connected ? (
+                      <>
+                        <Check size={16} /> Check again
+                      </>
+                    ) : (
+                      "Check connection"
+                    )}
+                  </button>
+                  {sample && (
+                    <p className="field-hint">
+                      Model connections are available in the desktop app. The
+                      sample does not send messages.
+                    </p>
+                  )}
+                  {connectionError && (
+                    <div className="inline-error" role="alert">
+                      <CircleAlert size={17} />
+                      <span>{connectionError}</span>
+                    </div>
+                  )}
+                  {models.length > 0 && (
+                    <>
+                      <label htmlFor="model">Model</label>
+                      <select
+                        id="model"
+                        value={model}
+                        onChange={(event) => setModel(event.target.value)}
+                      >
+                        {models.map((item) => (
+                          <option key={item.name} value={item.name}>
+                            {item.name}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="connection-success">
+                        <Check size={15} />{" "}
+                        {provider === "codex"
+                          ? "ChatGPT via Codex is ready"
+                          : "Ollama is ready"}
+                      </div>
+                    </>
+                  )}
                 </div>
-              </>
-            )}
+              )}
+              {settingsPage === "appearance" && (
+                <div className="settings-section">
+                  <AppearanceSettings
+                    appearance={appearance}
+                    onAppearance={setAppearance}
+                    color={colorTheme}
+                    onColor={setColorTheme}
+                  />
+                  <div className="eyebrow reading-heading">
+                    READING & WRITING
+                  </div>
+                  <label htmlFor="text-size" className="setting-row">
+                    Conversation text <span>{fontSize}px</span>
+                  </label>
+                  <input
+                    id="text-size"
+                    type="range"
+                    min={16}
+                    max={22}
+                    value={fontSize}
+                    onChange={(event) =>
+                      setFontSize(Number(event.target.value))
+                    }
+                  />
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={enterToSend}
+                      onChange={(event) => setEnterToSend(event.target.checked)}
+                    />
+                    Enter sends a message
+                  </label>
+                  <p className="field-hint">
+                    When off, use Ctrl / ⌘ + Enter to send.
+                  </p>
+                </div>
+              )}
+              {settingsPage === "appearance" && (
+                <p className="settings-footnote">
+                  Appearance is saved on this device.
+                </p>
+              )}
+              {settingsPage === "privacy" && (
+                <PrivacySettings
+                  sample={sample}
+                  onReset={() => {
+                    void lock().then(() => setScreen("setup"));
+                  }}
+                />
+              )}
+              {settingsPage === "memory" && (
+                <div className="settings-section">
+                  <h3>Memory & notes</h3>
+                  <p>
+                    Remembered context helps conversations continue. You can
+                    review its sources, correct a detail, or forget it.
+                  </p>
+                  <button
+                    className="secondary-button"
+                    onClick={() => {
+                      setSettings(false);
+                      setHome(false);
+                      setMemoryView(true);
+                      setNotes(false);
+                    }}
+                  >
+                    Review remembered context
+                  </button>
+                  <button
+                    className="secondary-button"
+                    onClick={() => {
+                      setSettings(false);
+                      setHome(false);
+                      setNotes(true);
+                      setMemoryView(false);
+                    }}
+                  >
+                    Open your notes
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-          <div className="settings-section">
-            <div className="eyebrow">APPEARANCE</div>
-            <label htmlFor="appearance">Theme</label>
-            <select
-              id="appearance"
-              value={appearance}
-              onChange={(event) => setAppearance(event.target.value)}
-            >
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-            <div className="eyebrow reading-heading">READING & WRITING</div>
-            <label htmlFor="text-size" className="setting-row">
-              Conversation text <span>{fontSize}px</span>
-            </label>
-            <input
-              id="text-size"
-              type="range"
-              min={16}
-              max={22}
-              value={fontSize}
-              onChange={(event) => setFontSize(Number(event.target.value))}
-            />
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={enterToSend}
-                onChange={(event) => setEnterToSend(event.target.checked)}
-              />
-              Enter sends a message
-            </label>
-            <p className="field-hint">
-              When off, use Ctrl / ⌘ + Enter to send.
-            </p>
-          </div>
-          <p className="settings-footnote">
-            Theme is saved on this device. Reading preferences last until you
-            close the app.
-          </p>
           <button
             className="primary-button wide"
             onClick={() => setSettings(false)}
           >
             Done
           </button>
+        </Dialog>
+      )}
+      {restoreOpen && (
+        <Dialog title="Restore workspace" onClose={() => setRestoreOpen(false)}>
+          <RestoreWorkspace
+            onRestored={async () => {
+              setRestoreOpen(false);
+              await loadSessions();
+            }}
+          />
+        </Dialog>
+      )}
+      {plansOpen && (
+        <Dialog title="Planned sessions" onClose={() => setPlansOpen(false)}>
+          <PlannedSessions sample={sample} />
         </Dialog>
       )}
     </div>

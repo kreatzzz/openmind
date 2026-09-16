@@ -170,6 +170,26 @@ impl Drop for Vault {
 }
 
 impl Vault {
+    pub fn list_plans(&self) -> Result<Vec<crate::scheduler::SessionPlan>> {
+        crate::scheduler::list(&self.connection)
+    }
+
+    pub fn create_plan(&self, input: crate::scheduler::PlanInput) -> Result<crate::scheduler::SessionPlan> {
+        crate::scheduler::create(&self.connection, input, Utc::now())
+    }
+
+    pub fn remove_plan(&self, id: &str, revision: i64) -> Result<()> {
+        crate::scheduler::remove(&self.connection, id, revision)
+    }
+
+    pub fn enable_plan(&self, id: &str, enabled: bool, revision: i64) -> Result<crate::scheduler::SessionPlan> {
+        crate::scheduler::set_enabled(&self.connection, id, enabled, revision, Utc::now())
+    }
+
+    pub fn poll_plans(&mut self) -> Result<Vec<crate::scheduler::DuePlan>> {
+        crate::scheduler::poll(&mut self.connection, Utc::now())
+    }
+
     pub fn create<P: AsRef<Path>>(dir: P, passphrase: &str) -> Result<Self> {
         validate_passphrase(passphrase)?;
 

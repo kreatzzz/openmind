@@ -3,6 +3,10 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "get_vault_status",
+            "list_plans",
+            "create_plan",
+            "remove_plan",
+            "enable_plan",
             "open_demo",
             "list_notes",
             "edit_note",

@@ -8,6 +8,7 @@ export interface Session {
   revision: number;
   memoryEnabled: boolean;
   notesEnabled: boolean;
+  private?: boolean;
 }
 
 export interface Message {
@@ -82,6 +83,36 @@ export type TurnEvent =
 
 export const isDesktop = isTauri();
 
+export interface SessionPlan {
+  id: string;
+  label: string;
+  localStart: string;
+  timezone: string;
+  recurrence: "once" | "daily" | "weekly";
+  notifications: boolean;
+  enabled: boolean;
+  nextAt: string;
+  revision: number;
+}
+export type PlanInput = Pick<
+  SessionPlan,
+  "label" | "localStart" | "timezone" | "recurrence" | "notifications"
+>;
+
+export interface LifecycleSettings {
+  idleLockMinutes: number | null;
+  retentionDays: number | null;
+}
+export interface BackupSummary {
+  createdAt: string;
+  sessions: number;
+  messages: number;
+}
+export interface RestoreResult {
+  status: VaultStatus;
+  summary: BackupSummary;
+}
+
 function native<T>(
   command: string,
   args?: Record<string, unknown>,
@@ -103,6 +134,46 @@ function native<T>(
 }
 
 export const desktop = {
+  getLifecycleSettings: () =>
+    native<LifecycleSettings>("get_lifecycle_settings"),
+  updateLifecycleSettings: (
+    idleLockMinutes: number | null,
+    retentionDays: number | null,
+  ) =>
+    native<LifecycleSettings>("update_lifecycle_settings", {
+      idleLockMinutes,
+      retentionDays,
+    }),
+  exportBackup: (path: string, backupPassphrase: string) =>
+    native<BackupSummary>("export_vault_backup", { path, backupPassphrase }),
+  restoreBackup: (
+    path: string,
+    backupPassphrase: string,
+    confirmation: string,
+  ) =>
+    native<RestoreResult>("restore_vault_backup", {
+      path,
+      backupPassphrase,
+      confirmation,
+    }),
+  changePassphrase: (currentPassphrase: string, newPassphrase: string) =>
+    native<void>("change_vault_passphrase", {
+      currentPassphrase,
+      newPassphrase,
+    }),
+  pruneRetention: (confirmation: string) =>
+    native<{ sessionsDeleted: number }>("prune_retention", { confirmation }),
+  resetVault: (confirmation: string) =>
+    native<VaultStatus>("reset_vault", { confirmation }),
+  createPrivateSession: () => native<Session>("create_private_session"),
+  recordActivity: () => native<void>("record_activity"),
+  listPlans: () => native<SessionPlan[]>("list_plans"),
+  createPlan: (input: PlanInput) =>
+    native<SessionPlan>("create_plan", { input }),
+  removePlan: (id: string, expectedRevision: number) =>
+    native<void>("remove_plan", { id, expectedRevision }),
+  enablePlan: (id: string, enabled: boolean, expectedRevision: number) =>
+    native<SessionPlan>("enable_plan", { id, enabled, expectedRevision }),
   getVaultStatus: () => native<VaultStatus>("get_vault_status"),
   openDemo: (loginId: string, passphrase: string) =>
     native<VaultStatus>("open_demo", { loginId, passphrase }),

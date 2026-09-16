@@ -3,7 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tauri::{ipc::Channel, Manager, State};
+use tauri::{ipc::Channel, Emitter, Manager, State};
+use tauri_plugin_notification::NotificationExt;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -15,6 +16,26 @@ use crate::{
 };
 
 struct DesktopState(Arc<Engine>);
+
+#[tauri::command]
+async fn list_plans(state: State<'_, DesktopState>) -> Result<Vec<crate::scheduler::SessionPlan>, String> {
+    blocking(&state, Engine::list_plans).await
+}
+
+#[tauri::command]
+async fn create_plan(state: State<'_, DesktopState>, input: crate::scheduler::PlanInput) -> Result<crate::scheduler::SessionPlan, String> {
+    blocking(&state, move |engine| engine.create_plan(input)).await
+}
+
+#[tauri::command]
+async fn remove_plan(state: State<'_, DesktopState>, id: String, expected_revision: i64) -> Result<(), String> {
+    blocking(&state, move |engine| engine.remove_plan(&id, expected_revision)).await
+}
+
+#[tauri::command]
+async fn enable_plan(state: State<'_, DesktopState>, id: String, enabled: bool, expected_revision: i64) -> Result<crate::scheduler::SessionPlan, String> {
+    blocking(&state, move |engine| engine.enable_plan(&id, enabled, expected_revision)).await
+}
 
 struct Connection {
     provider: ProviderKind,
@@ -515,13 +536,35 @@ async fn send_message(
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let directory = app.path().app_data_dir()?.join("vault");
-            app.manage(DesktopState(Arc::new(Engine::new(directory))));
+            let engine = Arc::new(Engine::new(directory));
+            app.manage(DesktopState(Arc::clone(&engine)));
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut timer = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    timer.tick().await;
+                    let engine = Arc::clone(&engine);
+                    if let Ok(Ok(due)) = tauri::async_runtime::spawn_blocking(move || engine.poll_plans()).await {
+                        if due.is_empty() { continue; }
+                        if due.iter().any(|plan| plan.notifications) {
+                            let _ = handle.notification().builder().title("Openmind").body("You have time set aside for a conversation.").show();
+                        }
+                        let _ = handle.emit("planned-session-due", &due);
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_vault_status,
+            list_plans,
+            create_plan,
+            remove_plan,
+            enable_plan,
             open_demo,
             list_notes,
             edit_note,
