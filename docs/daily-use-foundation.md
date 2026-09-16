@@ -26,7 +26,7 @@ Encrypted backups contain a checkpointed SQLCipher database and an authenticated
 
 Private conversations live in process memory and create no saved transcript, note, memory, or derivation-job records. Lock, quit, and renderer reconnect clear them. They still send their current conversation to the chosen provider; private mode does not control that provider's logs or retention.
 
-A native timer enforces configurable idle locking. Tauri resume events also lock an open vault. Direct Windows/macOS session-lock integration and native suspend/resume verification remain outstanding. Retention settings select an age threshold; pruning requires an explicit action and confirmation. Reset deletes the active personal vault. Neither operation deletes exported backups or provider-held copies.
+A native timer enforces configurable idle locking. Tauri resume events also lock an open vault. Windows now subscribes to current-session lock, console/remote disconnect, and suspend events. macOS subscribes to documented session-resign, system-sleep, and screen-sleep notifications; a normal awake screen lock is not covered by those notifications. Actual OS lock/suspend checks on Windows and macOS, plus a supported macOS awake-lock signal, remain release work. Retention settings select an age threshold; pruning requires an explicit action and confirmation. Reset deletes the active personal vault. Neither operation deletes exported backups or provider-held copies.
 
 ## Plans and accessibility
 

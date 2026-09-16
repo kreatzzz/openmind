@@ -47,7 +47,7 @@ An experimental ChatGPT subscription adapter using Codex App Server is checked i
 
 ## Not implemented
 
-Entity reconciliation and explicit relationships between memory nodes, topic-wide forgetting, summaries, transcript editing, speech input/output, keychain convenience unlock, direct OS session-lock notifications, and signed updates are future work. Suspend/resume delivery and OS session-lock behavior still require native verification on both supported platforms.
+Entity reconciliation and explicit relationships between memory nodes, topic-wide forgetting, summaries, transcript editing, speech input/output, keychain convenience unlock, and signed updates are future work. Windows session-lock/disconnect and suspend notifications are integrated. macOS observes documented session-resign, system-sleep, and screen-sleep notifications, which do not cover a normal awake screen lock. Native verification on both supported platforms and a supported macOS awake-lock signal remain release work.
 
 The current extraction reads only the user message for its turn. It does not derive commitments from the assistant response, merge older entities, or process interrupted replies. A new reply cancels and defers active notes work; a bounded background queue resumes eligible jobs. This is the first implementation of the two-call design, not the complete job scheduling and graph specification. Deleting a notebook entry does not remove its source or internal memory; delete the conversation to remove all of those records from the active vault. Existing backups are outside that deletion.
 
