@@ -81,11 +81,11 @@ components:
 
 Krish selected Vercel's Geist design system for this interface. Openmind keeps its own name and mark. The implementation uses bundled Geist and Geist Mono fonts, neutral semantic tokens, compact controls, and restrained elevation. Reference the official [colors](https://vercel.com/geist/colors), [typography](https://vercel.com/geist/typography), [buttons](https://vercel.com/geist/button), and [materials](https://vercel.com/geist/materials) when extending components. This is a local implementation of those principles, not an imported Vercel component library.
 
-## Implemented desktop preview
+## Implemented desktop workspace
 
 The shell has a 248px navigation rail, a 64px header, and a reading column around 680px wide. The rail is a quiet utility surface: the dark New conversation action establishes the primary path, while selected rows use a neutral fill and the remaining navigation stays low contrast. Below 960px navigation moves into an accessible dialog. Content uses one column on narrow screens without hiding essential actions.
 
-The welcome screen is a restrained two-column entry on wide screens, pairing the product introduction with a single vault panel; it collapses to one column on narrow screens. Vault creation or unlock remains primary and Open demo stays visible. Demo opens fictional conversations and notes without creating a personal account. The native demo uses a separate demo vault. Its known credentials are unsuitable for personal information. Keep the synthetic-only banner visible in every demo view. The browser demo permits temporary edits to fictional notes and clearly states that it has no inference or storage.
+The welcome screen uses a guided workspace, privacy, and model-connection flow. Vault creation or unlock remains primary. An example workspace is identified once at entry as fictional and temporary; it does not repeat disclosure banners throughout the product.
 
 The conversation header offers Conversation controls and deletion with confirmation. Conversation controls let the user rename the conversation and independently choose whether to use/save remembered context and save notebook updates. Off states remain visible beside the conversation. Explain that the transcript stays saved, existing memories and notes are retained, and settings apply to this conversation. Disabling a branch also stops its outstanding updates; enabling it again does not process messages submitted while it was off. Keep controls unavailable during an active reply or notes update, with a clear stop-first explanation. Deleting a conversation removes its transcript and derived notes and internal memory from the active vault. Do not promise backup erasure.
 

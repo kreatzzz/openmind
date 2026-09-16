@@ -6,9 +6,11 @@ import { desktop, type LifecycleSettings } from "../lib/desktop";
 export function PrivacySettings({
   sample,
   onReset,
+  onDataChanged,
 }: {
   sample: boolean;
   onReset: () => void;
+  onDataChanged: () => Promise<void>;
 }) {
   const [settings, setSettings] = useState<LifecycleSettings>({
     idleLockMinutes: 15,
@@ -91,6 +93,7 @@ export function PrivacySettings({
         );
       } else if (operation === "prune") {
         const result = await desktop.pruneRetention(confirmation);
+        await onDataChanged();
         setStatus(`${result.sessionsDeleted} expired conversations removed.`);
       } else if (operation === "reset") {
         await desktop.resetVault(confirmation);

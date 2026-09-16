@@ -149,6 +149,17 @@
   background: var(--hover);
   opacity: 1;
 }
+.private-conversation {
+  min-height: 36px;
+  justify-content: flex-start;
+  padding: 0 11px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.private-conversation:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
 .workspace-navigation {
   padding-top: 18px;
   display: grid;
@@ -509,6 +520,22 @@
 .conversation-column {
   max-width: 790px;
   padding-top: 32px;
+}
+:root[data-line-width="compact"] .conversation-column,
+:root[data-line-width="compact"] .composer-column {
+  max-width: 650px;
+}
+:root[data-line-width="wide"] .conversation-column,
+:root[data-line-width="wide"] .composer-column {
+  max-width: 920px;
+}
+:root[data-reduce-motion="true"] *,
+:root[data-reduce-motion="true"] *::before,
+:root[data-reduce-motion="true"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+  transition-duration: 0.01ms !important;
 }
 .conversation-title h1 {
   font-size: 24px;

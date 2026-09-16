@@ -181,13 +181,6 @@ export function MemoryWorkspace({
           </p>
         </aside>
 
-        {sample && (
-          <p className="memory-disclosure">
-            Browser demo · fictional context only. Changes reset when you close
-            the demo. No new inference or storage happens in this sample.
-          </p>
-        )}
-
         {(error || actionError) && (
           <div className="memory-error" role="alert">
             <CircleAlert size={17} aria-hidden="true" />

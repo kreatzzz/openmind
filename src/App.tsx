@@ -10,7 +10,6 @@ import {
   Shield,
   Plug,
   BookOpen,
-  Check,
   ChevronRight,
   CircleAlert,
   LockKeyhole,
@@ -19,6 +18,7 @@ import {
   SlidersHorizontal,
   Settings2,
   Search,
+  Ghost,
   Trash2,
   Square,
   X,
@@ -34,6 +34,7 @@ import { HomeWorkspace } from "./components/HomeWorkspace";
 import { PlannedSessions } from "./components/PlannedSessions";
 import { PrivacySettings } from "./components/PrivacySettings";
 import { RestoreWorkspace } from "./components/RestoreWorkspace";
+import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
 import {
   AppearanceSettings,
   COLOR_THEMES,
@@ -43,7 +44,9 @@ import {
   isDesktop,
   type Message,
   type MemoryRecord,
-  type ModelInfo,
+  type ProviderKind,
+  type ProviderSettings,
+  type ReadingSettings,
   type Session,
   type TurnEvent,
   type UserNote,
@@ -104,6 +107,21 @@ const dateLabel = (value: string) =>
     month: "long",
     day: "numeric",
   });
+function setThemeAttribute(name: "theme" | "color", value: string) {
+  const style = document.createElement("style");
+  style.textContent = "*,*::before,*::after{transition:none!important}";
+  document.head.append(style);
+  document.documentElement.dataset[name] = value;
+  void document.documentElement.offsetHeight;
+  requestAnimationFrame(() => style.remove());
+}
+const DEFAULT_READING: ReadingSettings = {
+  textScalePercent: 100,
+  lineWidth: "comfortable",
+  reduceMotion: false,
+  enterToSend: true,
+  revision: 0,
+};
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>(
@@ -126,7 +144,7 @@ export default function App() {
     }
   });
   useEffect(() => {
-    document.documentElement.dataset.theme = appearance;
+    setThemeAttribute("theme", appearance);
     try {
       localStorage.setItem("openmind.appearance.v1", appearance);
     } catch {
@@ -150,6 +168,7 @@ export default function App() {
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [home, setHome] = useState(true);
   const [plansOpen, setPlansOpen] = useState(false);
+  const [duePlan, setDuePlan] = useState<string | null>(null);
   const [colorTheme, setColorTheme] = useState(() => {
     try {
       const value = localStorage.getItem("openmind.color.v1");
@@ -161,7 +180,7 @@ export default function App() {
     }
   });
   useEffect(() => {
-    document.documentElement.dataset.color = colorTheme;
+    setThemeAttribute("color", colorTheme);
     try {
       localStorage.setItem("openmind.color.v1", colorTheme);
     } catch {
@@ -174,18 +193,21 @@ export default function App() {
   const [drawer, setDrawer] = useState(false);
   const [deleteConversation, setDeleteConversation] = useState(false);
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:11434");
-  const [provider, setProvider] = useState<"ollama" | "codex">("ollama");
+  const [provider, setProvider] = useState<ProviderKind>("ollama");
   const [remoteConsent, setRemoteConsent] = useState(false);
   const [model, setModel] = useState("");
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [connectionError, setConnectionError] = useState("");
-  const [discovering, setDiscovering] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [fontSize, setFontSize] = useState(17);
-  const [enterToSend, setEnterToSend] = useState(true);
+  const [reading, setReading] = useState<ReadingSettings>(DEFAULT_READING);
+  const [readingError, setReadingError] = useState("");
+  useEffect(() => {
+    document.documentElement.dataset.lineWidth = reading.lineWidth;
+    document.documentElement.dataset.reduceMotion = String(
+      reading.reduceMotion,
+    );
+  }, [reading.lineWidth, reading.reduceMotion]);
   const [newReply, setNewReply] = useState(false);
   const generation = useRef(0);
-  const connectionGeneration = useRef(0);
+  const turnGeneration = useRef(0);
   const activeTurn = useRef(false);
   const stopRequested = useRef(false);
   const locking = useRef(false);
@@ -193,6 +215,9 @@ export default function App() {
   const scroll = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const draftsBySession = useRef(new Map<string, string>());
+  const lastActivity = useRef(0);
+  const fontSize = Math.round((17 * reading.textScalePercent) / 100);
+  const enterToSend = reading.enterToSend;
   const session = sessions.find((item) => item.id === selected);
 
   function setDraftValue(value: string, sessionId: string | null = selected) {
@@ -235,10 +260,20 @@ export default function App() {
   async function loadSessions() {
     const request = generation.current;
     setMemoryLoading(true);
-    const [sessionResult, noteResult, memoryResult] = await Promise.allSettled([
+    const [
+      sessionResult,
+      noteResult,
+      memoryResult,
+      providerResult,
+      readingResult,
+      healthResult,
+    ] = await Promise.allSettled([
       desktop.listSessions(),
       desktop.listNotes(),
       desktop.listMemories(),
+      desktop.getProviderSettings(),
+      desktop.getReadingSettings(),
+      desktop.checkProviderHealth(),
     ]);
     if (sessionResult.status === "rejected") throw sessionResult.reason;
     if (noteResult.status === "rejected") throw noteResult.reason;
@@ -253,6 +288,14 @@ export default function App() {
       setMemoryError(errorText(memoryResult.reason));
     }
     setMemoryLoading(false);
+    if (providerResult.status === "fulfilled") {
+      applyProviderSettings(
+        providerResult.value,
+        healthResult.status === "fulfilled" &&
+          healthResult.value.status === "ready",
+      );
+    }
+    if (readingResult.status === "fulfilled") setReading(readingResult.value);
     const loaded = list[0] ? await desktop.listMessages(list[0].id) : [];
     if (request !== generation.current) return;
     setSessions(list);
@@ -260,6 +303,34 @@ export default function App() {
     setSelected(list[0]?.id ?? null);
     setMessages(loaded);
     setScreen("conversation");
+    if (
+      providerResult.status === "fulfilled" &&
+      !providerResult.value.model.trim()
+    ) {
+      setSettingsPage("connection");
+      setSettings(true);
+    }
+  }
+
+  function applyProviderSettings(value: ProviderSettings, ready: boolean) {
+    setProvider(value.provider);
+    setBaseUrl(value.baseUrl);
+    setModel(value.model);
+    setRemoteConsent(value.remoteDataConsent);
+    setConnected(ready);
+  }
+  async function saveReadingSettings(next: ReadingSettings) {
+    setReading(next);
+    setReadingError("");
+    if (sample) return;
+    try {
+      const saved = await desktop.updateReadingSettings(next);
+      setReading((current) =>
+        current.revision > next.revision ? current : saved,
+      );
+    } catch (reason) {
+      setReadingError(errorText(reason));
+    }
   }
   async function refreshMemories() {
     const request = generation.current;
@@ -299,6 +370,81 @@ export default function App() {
       generation.current++;
     };
   }, []);
+  useEffect(() => {
+    if (!isDesktop) return;
+    let disposed = false;
+    const unlisten = Promise.all([
+      desktop.onVaultLocked(() => clearRendererForLock()),
+      desktop.onPlannedSessionDue((plan) => setDuePlan(plan.label)),
+    ]);
+    return () => {
+      disposed = true;
+      void unlisten.then((callbacks) => {
+        if (disposed) callbacks.forEach((callback) => callback());
+      });
+    };
+  }, []);
+  useEffect(() => {
+    if (!isDesktop || sample || screen !== "conversation") return;
+    const record = () => {
+      const now = Date.now();
+      if (now - lastActivity.current < 15_000) return;
+      lastActivity.current = now;
+      void desktop.recordActivity().catch(() => {});
+    };
+    const options = { passive: true } as const;
+    window.addEventListener("pointerdown", record, options);
+    window.addEventListener("keydown", record);
+    window.addEventListener("focus", record);
+    record();
+    return () => {
+      window.removeEventListener("pointerdown", record);
+      window.removeEventListener("keydown", record);
+      window.removeEventListener("focus", record);
+    };
+  }, [sample, screen]);
+  useEffect(() => {
+    if (!isDesktop || sample || screen !== "conversation") return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    const resume = async () => {
+      if (cancelled || activeTurn.current) return;
+      attempts += 1;
+      try {
+        const jobs = await desktop.listNoteJobs();
+        if (cancelled || !jobs.some((job) => job.status === "pending")) return;
+        await desktop.resumeNoteJobs((event) => {
+          if (cancelled || event.type !== "notes") return;
+          const status = formatDerivationStatus(
+            event.status,
+            event.memoryEnabled ?? true,
+            event.notesEnabled ?? true,
+            event.message,
+          );
+          setNoteStatus(status);
+        });
+        if (!cancelled) {
+          const [loadedNotes, loadedMemories] = await Promise.all([
+            desktop.listNotes(),
+            desktop.listMemories(),
+          ]);
+          if (!cancelled) {
+            setUserNotes(loadedNotes);
+            setMemories(loadedMemories);
+          }
+        }
+      } catch {
+        if (!cancelled && attempts < 3)
+          timer = setTimeout(() => void resume(), attempts * 2_000);
+      }
+    };
+    void resume();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [sample, screen]);
   useEffect(() => {
     if (atBottom.current && scroll.current)
       scroll.current.scrollTop = scroll.current.scrollHeight;
@@ -340,7 +486,6 @@ export default function App() {
         const status = await desktop.openDemo("demo", "openmind-demo-2026");
         setIsDemo(status.isDemo);
         await loadSessions();
-        void discoverModels();
       } catch (reason) {
         setError(errorText(reason));
       } finally {
@@ -421,7 +566,11 @@ export default function App() {
   }
   function exitSample() {
     generation.current++;
-    changeProvider("ollama");
+    setProvider("ollama");
+    setBaseUrl("http://127.0.0.1:11434");
+    setModel("");
+    setRemoteConsent(false);
+    setConnected(false);
     setSample(false);
     setIsDemo(false);
     setConversationControls(false);
@@ -557,63 +706,88 @@ export default function App() {
       if (request === generation.current) setBusy(false);
     }
   }
-  async function lock() {
-    if (locking.current) return;
-    locking.current = true;
+  function clearRendererForLock() {
     generation.current++;
-    connectionGeneration.current++;
+    turnGeneration.current++;
+    activeTurn.current = false;
+    stopRequested.current = false;
+    setMessages([]);
+    setIsDemo(false);
+    setUserNotes([]);
+    setMemories([]);
+    setMemoryError("");
+    setMemoryLoading(false);
+    setSearch("");
+    setNoteStatus("");
+    setHighlight(null);
+    setSessions([]);
+    setSelected(null);
+    draftsBySession.current.clear();
+    setDraftValue("", null);
+    setPassphrase("");
+    setConfirmation("");
+    setError("");
+    setProvider("ollama");
+    setRemoteConsent(false);
+    setConnected(false);
+    setModel("");
+    setAnnouncement("Vault locked.");
+    setSettings(false);
+    setRestoreOpen(false);
+    setPlansOpen(false);
+    setDuePlan(null);
+    setConversationControls(false);
+    setNotes(false);
+    setMemoryView(false);
+    setDeleteConversation(false);
+    setDrawer(false);
+    setSending(false);
+    setNewReply(false);
+    setBusy(false);
+    setScreen("locked");
+  }
+  async function newPrivateSession() {
+    setHome(false);
+    if (sending || busy || sample) return;
+    rememberCurrentDraft();
+    const request = ++generation.current;
     setBusy(true);
     setError("");
     try {
-      if (activeTurn.current) {
-        try {
-          await desktop.cancelTurn();
-        } catch {
-          /* Lock still needs to be attempted if cancellation fails. */
-        }
-      }
-      await desktop.lockVault();
-      activeTurn.current = false;
-      stopRequested.current = false;
+      const item = await desktop.createPrivateSession();
+      if (request !== generation.current) return;
+      setSessions((current) => [item, ...current]);
+      setSelected(item.id);
       setMessages([]);
-      setIsDemo(false);
-      setUserNotes([]);
-      setMemories([]);
-      setMemoryError("");
-      setMemoryLoading(false);
-      setSearch("");
-      setNoteStatus("");
-      setHighlight(null);
-      setSessions([]);
-      setSelected(null);
-      draftsBySession.current.clear();
-      setDraftValue("", null);
-      setPassphrase("");
-      setConfirmation("");
-      setError("");
-      setConnectionError("");
-      setProvider("ollama");
-      setRemoteConsent(false);
-      setConnected(false);
-      setModels([]);
-      setModel("");
-      setAnnouncement("Vault locked.");
-      setSettings(false);
-      setConversationControls(false);
+      setDraftValue("", item.id);
       setNotes(false);
       setMemoryView(false);
-      setDeleteConversation(false);
       setDrawer(false);
-      setSending(false);
-      setNewReply(false);
-      setDiscovering(false);
-      setScreen("locked");
+      setAnnouncement(
+        "Private conversation opened. It disappears when the vault locks.",
+      );
+      composer.current?.focus();
+    } catch (reason) {
+      if (request === generation.current) setError(errorText(reason));
+    } finally {
+      if (request === generation.current) setBusy(false);
+    }
+  }
+
+  async function lock() {
+    if (locking.current) return;
+    locking.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      if (activeTurn.current) await desktop.cancelTurn().catch(() => {});
+      await desktop.lockVault();
+      clearRendererForLock();
     } catch {
       setError("The vault could not be locked. Try locking it again.");
     } finally {
       locking.current = false;
-      setBusy(false);
-      setSending(false);
+      if (screen === "conversation") setBusy(false);
     }
   }
   async function removeConversation() {
@@ -742,58 +916,10 @@ export default function App() {
       setHighlight(memory.sourceMessageId);
     }
   }
-  function changeProvider(next: "ollama" | "codex") {
-    connectionGeneration.current++;
-    setProvider(next);
-    setRemoteConsent(false);
-    setModels([]);
-    setModel("");
-    setConnected(false);
-    setDiscovering(false);
-    setConnectionError("");
-  }
-  async function discoverModels() {
-    const request = ++connectionGeneration.current;
-    setDiscovering(true);
-    setConnectionError("");
-    setConnected(false);
-    try {
-      const result =
-        provider === "codex"
-          ? await desktop.listCodexModels()
-          : await desktop.listModels(baseUrl);
-      if (request !== connectionGeneration.current) return;
-      setModels(result);
-      setModel((current) =>
-        result.some((item) => item.name === current)
-          ? current
-          : (result[0]?.name ?? ""),
-      );
-      setConnected(result.length > 0);
-      if (!result.length)
-        setConnectionError(
-          provider === "codex"
-            ? "No Codex models are available. Check your ChatGPT access in Codex and try again."
-            : "Ollama is reachable, but no models are installed. Install a model in Ollama, then check again.",
-        );
-    } catch (reason) {
-      if (request === connectionGeneration.current) {
-        setModels([]);
-        setModel("");
-        setConnectionError(errorText(reason));
-      }
-    } finally {
-      if (request === connectionGeneration.current) setDiscovering(false);
-    }
-  }
   async function send(event?: FormEvent) {
     event?.preventDefault();
     if (!draft.trim() || activeTurn.current || busy || sample) return;
-    if (
-      !connected ||
-      !model ||
-      (provider === "codex" && (!isDemo || !remoteConsent))
-    ) {
+    if (!connected || !model || (provider !== "ollama" && !remoteConsent)) {
       setSettings(true);
       return;
     }
@@ -807,6 +933,7 @@ export default function App() {
     setNoteStatus("");
     const content = draft.trim();
     const request = generation.current;
+    const turn = ++turnGeneration.current;
     let received = false;
     let cancellationSent = false;
     setDraftValue("", selected);
@@ -839,7 +966,8 @@ export default function App() {
         provider,
         remoteConsent,
         onEvent: (event: TurnEvent) => {
-          if (generation.current !== request) return;
+          if (generation.current !== request || turnGeneration.current !== turn)
+            return;
           if (event.type === "message") {
             if (stopRequested.current && !cancellationSent) {
               cancellationSent = true;
@@ -874,6 +1002,8 @@ export default function App() {
                 ? "Reply complete."
                 : "Reply stopped.",
             );
+            activeTurn.current = false;
+            setSending(false);
           }
           if (event.type === "notes") {
             if (event.status === "updating" && stopRequested.current) {
@@ -897,12 +1027,12 @@ export default function App() {
         },
       });
     } catch (reason) {
-      if (generation.current === request) {
+      if (generation.current === request && turnGeneration.current === turn) {
         setError(errorText(reason));
         if (!received) restoreDraft();
       }
     } finally {
-      if (generation.current === request) {
+      if (generation.current === request && turnGeneration.current === turn) {
         try {
           const [updatedSessions, updatedNotes, updatedMemories] =
             await Promise.all([
@@ -953,11 +1083,7 @@ export default function App() {
       return;
     const retryMemoryEnabled = sessionMemoryEnabled;
     const retryNotesEnabled = sessionNotesEnabled;
-    if (
-      !connected ||
-      !model ||
-      (provider === "codex" && (!isDemo || !remoteConsent))
-    ) {
+    if (!connected || !model || (provider !== "ollama" && !remoteConsent)) {
       setSettings(true);
       return;
     }
@@ -1044,6 +1170,16 @@ export default function App() {
         <Plus size={18} />
         New conversation
       </button>
+      {!sample && (
+        <button
+          className="private-conversation"
+          onClick={() => void newPrivateSession()}
+          disabled={sending || busy}
+        >
+          <Ghost size={17} />
+          Private conversation
+        </button>
+      )}
       <div className="workspace-navigation">
         <button
           className={`rail-action ${home ? "rail-action-selected" : ""}`}
@@ -1099,7 +1235,9 @@ export default function App() {
                 }
                 disabled={sending || busy}
               >
-                <span>{item.title}</span>
+                <span>
+                  {item.private ? `Private · ${item.title}` : item.title}
+                </span>
                 <small>{dateLabel(item.createdAt)}</small>
               </button>
             ))
@@ -1265,22 +1403,28 @@ export default function App() {
               !notes &&
               !memoryView &&
               session &&
-              (!sessionMemoryEnabled || !sessionNotesEnabled) && (
+              (session.private ||
+                !sessionMemoryEnabled ||
+                !sessionNotesEnabled) && (
                 <div className="conversation-status" role="status">
                   <span>
-                    {!sessionMemoryEnabled && !sessionNotesEnabled
-                      ? "Remembered context and Your notes are off for this conversation."
-                      : !sessionMemoryEnabled
-                        ? "Remembered context is off for this conversation."
-                        : "Your notes are off for this conversation."}
+                    {session.private
+                      ? "Private conversation. It is never saved and disappears when the vault locks."
+                      : !sessionMemoryEnabled && !sessionNotesEnabled
+                        ? "Remembered context and Your notes are off for this conversation."
+                        : !sessionMemoryEnabled
+                          ? "Remembered context is off for this conversation."
+                          : "Your notes are off for this conversation."}
                   </span>
-                  <button
-                    className="text-button"
-                    onClick={openConversationControls}
-                    disabled={sending || busy}
-                  >
-                    Review controls
-                  </button>
+                  {!session.private && (
+                    <button
+                      className="text-button"
+                      onClick={openConversationControls}
+                      disabled={sending || busy}
+                    >
+                      Review controls
+                    </button>
+                  )}
                 </div>
               )}
             {home ? (
@@ -1492,7 +1636,7 @@ export default function App() {
                               type="submit"
                               aria-label={
                                 connected &&
-                                (provider !== "codex" || remoteConsent)
+                                (provider === "ollama" || remoteConsent)
                                   ? "Send message"
                                   : "Set up model connection"
                               }
@@ -1533,15 +1677,17 @@ export default function App() {
                         ) : connected ? (
                           <>
                             <span className="status-dot" />{" "}
-                            {provider === "codex"
-                              ? "Online · ChatGPT via Codex"
-                              : "Ollama on loopback"}
+                            {provider === "ollama"
+                              ? "Ollama on loopback"
+                              : provider === "codex"
+                                ? "Online · ChatGPT via Codex"
+                                : "Online · OpenAI-compatible API"}
                           </>
                         ) : (
                           <button onClick={() => setSettings(true)}>
-                            {provider === "codex"
-                              ? "Set up ChatGPT connection"
-                              : "Connect a local model"}{" "}
+                            {provider === "ollama"
+                              ? "Connect a local model"
+                              : "Set up online connection"}{" "}
                             <ArrowRight size={12} />
                           </button>
                         )}
@@ -1608,6 +1754,34 @@ export default function App() {
           </div>
         </Dialog>
       )}
+      {duePlan && (
+        <Dialog
+          title="A planned session is ready"
+          onClose={() => setDuePlan(null)}
+        >
+          <p>{duePlan}</p>
+          <p className="field-hint">
+            Open a conversation whenever you are ready.
+          </p>
+          <div className="note-actions">
+            <button
+              className="secondary-button"
+              onClick={() => setDuePlan(null)}
+            >
+              Later
+            </button>
+            <button
+              className="primary-button"
+              onClick={() => {
+                setDuePlan(null);
+                void newSession();
+              }}
+            >
+              Start conversation
+            </button>
+          </div>
+        </Dialog>
+      )}
       {conversationControls && session && (
         <ConversationControls
           key={session.id}
@@ -1661,132 +1835,12 @@ export default function App() {
             </nav>
             <div className="settings-content">
               {settingsPage === "connection" && (
-                <div className="settings-section">
-                  <div className="eyebrow">MODEL CONNECTION</div>
-                  <label htmlFor="provider">Provider</label>
-                  <select
-                    id="provider"
-                    value={provider}
-                    disabled={sample || sending}
-                    onChange={(event) =>
-                      changeProvider(
-                        event.target.value === "codex" && isDemo && !sample
-                          ? "codex"
-                          : "ollama",
-                      )
-                    }
-                  >
-                    <option value="ollama">Local Ollama</option>
-                    {isDemo && !sample && (
-                      <option value="codex">ChatGPT via Codex</option>
-                    )}
-                  </select>
-                  {provider === "codex" ? (
-                    <>
-                      <h3>ChatGPT via Codex · Online</h3>
-                      <p>
-                        Uses the ChatGPT account signed in to Codex on this
-                        device. Subscription limits apply. Available in the
-                        example workspace.
-                      </p>
-                      <p>
-                        This sends example messages, recent conversation
-                        context, internal memory, and the source for note
-                        updates to OpenAI.
-                      </p>
-                      <label className="checkbox-label">
-                        <input
-                          type="checkbox"
-                          checked={remoteConsent}
-                          disabled={sending}
-                          onChange={(event) =>
-                            setRemoteConsent(event.target.checked)
-                          }
-                        />
-                        I agree to send this context to OpenAI.
-                      </label>
-                      <p className="field-hint">
-                        If signed out, run <code>codex login</code> in a
-                        terminal, then check the connection.
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <h3>Ollama on loopback</h3>
-                      <p>Model execution location unverified.</p>
-                      <p>
-                        Messages are sent to the configured Ollama endpoint.
-                        Only loopback addresses are supported in this prototype.
-                        Ollama may have its own logging and network settings.
-                      </p>
-                      <label htmlFor="endpoint">Local endpoint</label>
-                      <input
-                        id="endpoint"
-                        value={baseUrl}
-                        disabled={sample || discovering}
-                        onChange={(event) => {
-                          connectionGeneration.current++;
-                          setBaseUrl(event.target.value);
-                          setConnected(false);
-                          setModels([]);
-                          setModel("");
-                          setConnectionError("");
-                        }}
-                        spellCheck={false}
-                      />
-                    </>
-                  )}
-                  <button
-                    className="secondary-button"
-                    onClick={discoverModels}
-                    disabled={sample || discovering}
-                  >
-                    {discovering ? (
-                      "Checking connection…"
-                    ) : connected ? (
-                      <>
-                        <Check size={16} /> Check again
-                      </>
-                    ) : (
-                      "Check connection"
-                    )}
-                  </button>
-                  {sample && (
-                    <p className="field-hint">
-                      Model connections are available in the desktop app. The
-                      sample does not send messages.
-                    </p>
-                  )}
-                  {connectionError && (
-                    <div className="inline-error" role="alert">
-                      <CircleAlert size={17} />
-                      <span>{connectionError}</span>
-                    </div>
-                  )}
-                  {models.length > 0 && (
-                    <>
-                      <label htmlFor="model">Model</label>
-                      <select
-                        id="model"
-                        value={model}
-                        onChange={(event) => setModel(event.target.value)}
-                      >
-                        {models.map((item) => (
-                          <option key={item.name} value={item.name}>
-                            {item.name}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="connection-success">
-                        <Check size={15} />{" "}
-                        {provider === "codex"
-                          ? "ChatGPT via Codex is ready"
-                          : "Ollama is ready"}
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
+                <ProviderSettingsPanel
+                  sample={sample}
+                  isDemo={isDemo}
+                  onSaved={applyProviderSettings}
+                />
+              )}{" "}
               {settingsPage === "appearance" && (
                 <div className="settings-section">
                   <AppearanceSettings
@@ -1799,29 +1853,72 @@ export default function App() {
                     READING & WRITING
                   </div>
                   <label htmlFor="text-size" className="setting-row">
-                    Conversation text <span>{fontSize}px</span>
+                    Conversation text <span>{reading.textScalePercent}%</span>
                   </label>
                   <input
                     id="text-size"
                     type="range"
-                    min={16}
-                    max={22}
-                    value={fontSize}
+                    min={90}
+                    max={130}
+                    step={5}
+                    value={reading.textScalePercent}
                     onChange={(event) =>
-                      setFontSize(Number(event.target.value))
+                      void saveReadingSettings({
+                        ...reading,
+                        textScalePercent: Number(event.target.value),
+                      })
                     }
                   />
+                  <label htmlFor="line-width">Reading width</label>
+                  <select
+                    id="line-width"
+                    value={reading.lineWidth}
+                    onChange={(event) =>
+                      void saveReadingSettings({
+                        ...reading,
+                        lineWidth: event.target
+                          .value as ReadingSettings["lineWidth"],
+                      })
+                    }
+                  >
+                    <option value="compact">Compact</option>
+                    <option value="comfortable">Comfortable</option>
+                    <option value="wide">Wide</option>
+                  </select>
                   <label className="checkbox-label">
                     <input
                       type="checkbox"
                       checked={enterToSend}
-                      onChange={(event) => setEnterToSend(event.target.checked)}
+                      onChange={(event) =>
+                        void saveReadingSettings({
+                          ...reading,
+                          enterToSend: event.target.checked,
+                        })
+                      }
                     />
                     Enter sends a message
+                  </label>
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={reading.reduceMotion}
+                      onChange={(event) =>
+                        void saveReadingSettings({
+                          ...reading,
+                          reduceMotion: event.target.checked,
+                        })
+                      }
+                    />
+                    Reduce interface motion
                   </label>
                   <p className="field-hint">
                     When off, use Ctrl / ⌘ + Enter to send.
                   </p>
+                  {readingError && (
+                    <p className="inline-error" role="alert">
+                      {readingError}
+                    </p>
+                  )}
                 </div>
               )}
               {settingsPage === "appearance" && (
@@ -1832,8 +1929,10 @@ export default function App() {
               {settingsPage === "privacy" && (
                 <PrivacySettings
                   sample={sample}
+                  onDataChanged={loadSessions}
                   onReset={() => {
-                    void lock().then(() => setScreen("setup"));
+                    clearRendererForLock();
+                    setScreen("setup");
                   }}
                 />
               )}

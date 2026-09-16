@@ -18,6 +18,17 @@ import {
 vi.mock("./lib/desktop", () => ({
   isDesktop: true,
   desktop: {
+    onVaultLocked: vi.fn(),
+    onPlannedSessionDue: vi.fn(),
+    recordActivity: vi.fn(),
+    getProviderSettings: vi.fn(),
+    updateProviderSettings: vi.fn(),
+    checkProviderHealth: vi.fn(),
+    getReadingSettings: vi.fn(),
+    updateReadingSettings: vi.fn(),
+    listNoteJobs: vi.fn(),
+    resumeNoteJobs: vi.fn(),
+    createPrivateSession: vi.fn(),
     getVaultStatus: vi.fn(),
     openDemo: vi.fn(),
     listNotes: vi.fn(),
@@ -86,9 +97,20 @@ function deferred<T>() {
 async function openConnectedApp() {
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-  fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
-  await screen.findByText("Ollama is ready");
+  fireEvent.click(screen.getByRole("button", { name: "Model connection" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Find available models" }),
+  );
+  await screen.findByDisplayValue("synthetic-model");
+  fireEvent.click(
+    screen.getByRole("button", { name: /Save and check connection/ }),
+  );
+  await screen.findByText("Connection saved. Ready for a conversation.");
   fireEvent.click(screen.getByRole("button", { name: "Done" }));
+  const conversation = screen.queryByRole("button", {
+    name: /Monday conversation.*September/,
+  });
+  if (conversation) fireEvent.click(conversation);
 }
 function submit(content: string) {
   fireEvent.change(screen.getByRole("textbox", { name: "Your message" }), {
@@ -110,6 +132,45 @@ beforeEach(() => {
     unlocked: true,
     isDemo: false,
   });
+  vi.mocked(desktop.onVaultLocked).mockResolvedValue(() => {});
+  vi.mocked(desktop.onPlannedSessionDue).mockResolvedValue(() => {});
+  vi.mocked(desktop.recordActivity).mockResolvedValue();
+  vi.mocked(desktop.getProviderSettings).mockResolvedValue({
+    provider: "ollama",
+    baseUrl: "http://127.0.0.1:11434",
+    model: "",
+    remoteDataConsent: false,
+    credentialPresent: false,
+    revision: 1,
+  });
+  vi.mocked(desktop.updateProviderSettings).mockImplementation(
+    async (value) => ({
+      ...value,
+      revision: value.revision + 1,
+    }),
+  );
+  vi.mocked(desktop.checkProviderHealth).mockResolvedValue({
+    provider: "ollama",
+    status: "ready",
+    destination: "local",
+    model: "synthetic-model",
+    capabilities: { streaming: true, structuredNotes: true },
+  });
+  vi.mocked(desktop.getReadingSettings).mockResolvedValue({
+    textScalePercent: 100,
+    lineWidth: "comfortable",
+    reduceMotion: false,
+    enterToSend: true,
+    revision: 1,
+  });
+  vi.mocked(desktop.updateReadingSettings).mockImplementation(
+    async (value) => ({
+      ...value,
+      revision: value.revision + 1,
+    }),
+  );
+  vi.mocked(desktop.resumeNoteJobs).mockResolvedValue();
+  vi.mocked(desktop.listNoteJobs).mockResolvedValue([]);
   vi.mocked(desktop.listNotes).mockResolvedValue([]);
   vi.mocked(desktop.listMemories).mockResolvedValue([]);
   vi.mocked(desktop.editMemory).mockResolvedValue({

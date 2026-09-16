@@ -1,4 +1,5 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface Session {
   id: string;
@@ -23,16 +24,40 @@ export interface Message {
 export type ProviderKind = "ollama" | "codex" | "openaiCompatible";
 
 export interface ProviderSettings {
-  provider: ProviderKind; baseUrl: string; model: string; remoteDataConsent: boolean; credentialPresent: boolean; revision: number;
+  provider: ProviderKind;
+  baseUrl: string;
+  model: string;
+  remoteDataConsent: boolean;
+  credentialPresent: boolean;
+  revision: number;
 }
 export interface ReadingSettings {
-  textScalePercent: number; lineWidth: "compact" | "comfortable" | "wide"; reduceMotion: boolean; enterToSend: boolean; revision: number;
+  textScalePercent: number;
+  lineWidth: "compact" | "comfortable" | "wide";
+  reduceMotion: boolean;
+  enterToSend: boolean;
+  revision: number;
 }
 export interface ProviderHealth {
-  provider: ProviderKind; status: "ready" | "unavailable" | "authRequired" | "misconfigured"; destination: "local" | "remote"; model: string; capabilities: { streaming: boolean; structuredNotes: boolean }; message?: string;
+  provider: ProviderKind;
+  status: "ready" | "unavailable" | "authRequired" | "misconfigured";
+  destination: "local" | "remote";
+  model: string;
+  capabilities: { streaming: boolean; structuredNotes: boolean };
+  message?: string;
 }
 export interface NoteJob {
-  messageId: string; status: "pending" | "running" | "complete" | "failed"; attemptCount: number; nextAttemptAt?: string; lastErrorCode?: string; memoryEnabled: boolean; notesEnabled: boolean; provider: ProviderKind; model: string; createdAt: string; updatedAt: string;
+  messageId: string;
+  status: "pending" | "running" | "complete" | "failed";
+  attemptCount: number;
+  nextAttemptAt?: string;
+  lastErrorCode?: string;
+  memoryEnabled: boolean;
+  notesEnabled: boolean;
+  provider: ProviderKind;
+  model: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ModelInfo {
@@ -147,16 +172,45 @@ function native<T>(
 }
 
 export const desktop = {
+  onVaultLocked: (listener: () => void): Promise<UnlistenFn> =>
+    listen("vault-locked", listener),
+  onPlannedSessionDue: (
+    listener: (plan: SessionPlan) => void,
+  ): Promise<UnlistenFn> =>
+    listen<SessionPlan>("planned-session-due", (event) =>
+      listener(event.payload),
+    ),
   getProviderSettings: () => native<ProviderSettings>("get_provider_settings"),
-  updateProviderSettings: (settings: ProviderSettings, apiKey?: string, clearApiKey = false) => native<ProviderSettings>("update_provider_settings", { provider: settings.provider, baseUrl: settings.baseUrl, model: settings.model, remoteDataConsent: settings.remoteDataConsent, expectedRevision: settings.revision, apiKey, clearApiKey }),
+  updateProviderSettings: (
+    settings: ProviderSettings,
+    apiKey?: string,
+    clearApiKey = false,
+  ) =>
+    native<ProviderSettings>("update_provider_settings", {
+      provider: settings.provider,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      remoteDataConsent: settings.remoteDataConsent,
+      expectedRevision: settings.revision,
+      apiKey,
+      clearApiKey,
+    }),
   checkProviderHealth: () => native<ProviderHealth>("check_provider_health"),
   getReadingSettings: () => native<ReadingSettings>("get_reading_settings"),
-  updateReadingSettings: (settings: ReadingSettings) => native<ReadingSettings>("update_reading_settings", { ...settings, expectedRevision: settings.revision }),
+  updateReadingSettings: (settings: ReadingSettings) =>
+    native<ReadingSettings>("update_reading_settings", {
+      ...settings,
+      expectedRevision: settings.revision,
+    }),
   listNoteJobs: () => native<NoteJob[]>("list_note_jobs"),
   async resumeNoteJobs(onEvent: (event: TurnEvent) => void): Promise<void> {
-    const channel = new Channel<TurnEvent>(); channel.onmessage = onEvent;
-    try { await native<void>("resume_note_jobs", { onEvent: channel }); }
-    finally { channel.onmessage = () => {}; }
+    const channel = new Channel<TurnEvent>();
+    channel.onmessage = onEvent;
+    try {
+      await native<void>("resume_note_jobs", { onEvent: channel });
+    } finally {
+      channel.onmessage = () => {};
+    }
   },
   getLifecycleSettings: () =>
     native<LifecycleSettings>("get_lifecycle_settings"),
