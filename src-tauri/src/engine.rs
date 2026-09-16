@@ -3061,6 +3061,57 @@ mod tests {
     }
 
     #[test]
+    fn repeated_foreground_preemption_does_not_consume_provider_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let source = engine
+            .prepare_turn(&session.id, "I want to take a short walk.")
+            .unwrap();
+        engine
+            .finish_turn(&source.assistant.id, MessageStatus::Complete)
+            .unwrap();
+
+        for index in 0..4 {
+            let deferred = engine.prepare_notes(&source.assistant.id).unwrap().unwrap();
+            let foreground = engine
+                .prepare_turn(&session.id, &format!("Foreground turn {index}."))
+                .unwrap();
+            assert!(deferred.cancel.is_cancelled());
+            assert_eq!(
+                engine.finish_notes(&deferred.attempt_id, None).unwrap(),
+                None
+            );
+            engine
+                .finish_turn(&foreground.assistant.id, MessageStatus::Interrupted)
+                .unwrap();
+        }
+
+        let deferred_job = engine
+            .list_note_jobs()
+            .unwrap()
+            .into_iter()
+            .find(|job| job.message_id == source.assistant.id)
+            .unwrap();
+        assert_eq!(deferred_job.status, "pending");
+        assert_eq!(deferred_job.attempt_count, 0);
+
+        for _ in 0..3 {
+            let attempt = engine.prepare_notes(&source.assistant.id).unwrap().unwrap();
+            assert_eq!(
+                engine.finish_notes(&attempt.attempt_id, None).unwrap(),
+                Some(NotesStatus::Failed)
+            );
+        }
+        let error = match engine.prepare_notes(&source.assistant.id) {
+            Err(error) => error,
+            Ok(_) => panic!("provider failure limit should reject another attempt"),
+        };
+        assert!(error.contains("retry limit"));
+    }
+
+    #[test]
     fn notes_retry_limit_is_bounded_and_reply_remains_complete() {
         let temp = tempfile::tempdir().unwrap();
         let engine = Engine::new(temp.path().join("vault"));

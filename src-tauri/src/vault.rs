@@ -1330,7 +1330,8 @@ impl Vault {
     pub fn defer_notes(&mut self, assistant_id: &str) -> Result<()> {
         let assistant_id = canonical_id(assistant_id, "assistant message ID")?;
         let changed = self.connection.execute(
-            "UPDATE notes_jobs SET status='pending', next_attempt_at=NULL,
+            "UPDATE notes_jobs SET status='pending',
+                    attempt_count=max(attempt_count - 1, 0), next_attempt_at=NULL,
                     last_error_code='foreground_preempted', updated_at=?1
              WHERE assistant_message_id=?2 AND status='running'",
             params![now_rfc3339(), assistant_id],
