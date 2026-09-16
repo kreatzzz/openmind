@@ -801,7 +801,7 @@ describe("remembered context workspace", () => {
       "Synthetic memory service unavailable.",
     );
     expect(
-      screen.getByRole("button", { name: "Try again" }),
+      screen.getByRole("button", { name: "Reload context" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: "Remembered context" }),

@@ -200,7 +200,7 @@ export function MemoryWorkspace({
                 disabled={disabled || pending}
               >
                 <RefreshCw size={14} aria-hidden="true" />
-                Try again
+                Reload context
               </button>
             )}
           </div>
