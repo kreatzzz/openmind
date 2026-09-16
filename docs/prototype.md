@@ -100,7 +100,7 @@ For an unsigned local native build without an installer:
 bun run tauri build --no-bundle
 ```
 
-Bundle configuration targets macOS app/DMG and Windows NSIS. Run native builds on the target OS. Signing identities, notarization credentials, installer smoke tests, and release automation are still required before publishing installers. The workflow currently checks compilation and tests on macOS and Windows; it does not publish releases.
+Bundle configuration targets macOS app/DMG and Windows NSIS. Run native builds on the target OS. The [desktop release workflow](desktop-release.md) now smoke-tests unsigned/ad-hoc development bundles and defines a manual, fail-closed signed draft release. Signing identities, notarization credentials, protected environment configuration, and clean-device tests are still required before publishing installers. No updater endpoint or updater signing key is configured.
 
 The vault lives under Tauri's per-user app-data directory for `io.github.kreatzzz.openmind`, in its `vault` subdirectory. Do not commit that directory or include it in issue reports. Examples and tests must contain only synthetic text.
 

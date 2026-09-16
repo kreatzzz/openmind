@@ -1,0 +1,266 @@
+name: Draft signed desktop release
+run-name: Draft signed desktop release ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build, such as v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  signing-preflight:
+    runs-on: ubuntu-24.04
+    environment: desktop-release
+    steps:
+      - name: Require every signing and notarization secret
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD WINDOWS_CERTIFICATE_THUMBPRINT WINDOWS_TIMESTAMP_URL; do
+            if test -z "${!name:-}"; then
+              echo "::error::Required desktop-release secret $name is not configured."
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+  macos:
+    name: Signed and notarized macOS Apple Silicon
+    needs: signing-preflight
+    runs-on: macos-15
+    environment: desktop-release
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.98.0
+      - name: Verify release source and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/tags/${RELEASE_TAG}"
+          git merge-base --is-ancestor HEAD origin/main
+          test "$(uname -m)" = "arm64"
+          bun install --frozen-lockfile
+          bun run release:verify
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/openmind-release.keychain-db"
+          keychain_password="$(openssl rand -base64 32)"
+          certificate="$RUNNER_TEMP/openmind-release.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain" | grep -F "$APPLE_SIGNING_IDENTITY"
+          rm "$certificate"
+      - name: Build signed macOS bundles
+        run: bun run tauri build --bundles app,dmg
+      - name: Notarize, staple, verify, and stage macOS assets
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          app_path="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          dmg_path="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$app_path"
+          test -n "$dmg_path"
+          notary_zip="$RUNNER_TEMP/Openmind-notarization.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "$notary_zip"
+          xcrun notarytool submit "$notary_zip" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$app_path"
+          xcrun notarytool submit "$dmg_path" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$dmg_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          spctl --assess --type execute --verbose=2 "$app_path"
+          xcrun stapler validate "$app_path"
+          xcrun stapler validate "$dmg_path"
+          mkdir -p release-assets
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" release-assets/Openmind_${RELEASE_TAG#v}_macos_arm64.app.zip
+          cp "$dmg_path" release-assets/Openmind_${RELEASE_TAG#v}_macos_arm64.dmg
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: signed-macos-arm64
+          path: release-assets/*
+          if-no-files-found: error
+
+  windows:
+    name: Signed Windows x64
+    needs: signing-preflight
+    runs-on: windows-2025
+    environment: desktop-release
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.98.0
+      - name: Verify release source and version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -ne "refs/tags/$env:RELEASE_TAG") { throw "Dispatch this workflow from the matching tag" }
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw "Release tag must point to a commit on main" }
+          if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") { throw "Windows release runner must be x64" }
+          bun install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw "bun install failed" }
+          bun run release:verify
+          if ($LASTEXITCODE -ne 0) { throw "release version verification failed" }
+      - name: Import Windows signing certificate
+        id: windows-signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $certificatePath = Join-Path $env:RUNNER_TEMP "openmind-release.pfx"
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation "Cert:\CurrentUser\My" -Password $password
+          Remove-Item -LiteralPath $certificatePath -Force
+          $expected = $env:WINDOWS_CERTIFICATE_THUMBPRINT.Replace(" ", "").ToUpperInvariant()
+          if ($certificate.Thumbprint.ToUpperInvariant() -ne $expected) { throw "Imported certificate thumbprint does not match WINDOWS_CERTIFICATE_THUMBPRINT" }
+          if ($certificate.NotAfter -le (Get-Date)) { throw "Windows signing certificate has expired" }
+          $config = @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $certificate.Thumbprint
+                digestAlgorithm = "sha256"
+                timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+                tsp = $true
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+          $configPath = Join-Path $env:RUNNER_TEMP "tauri.windows-release.conf.json"
+          Set-Content -LiteralPath $configPath -Value $config -Encoding utf8
+          "config=$configPath" >> $env:GITHUB_OUTPUT
+      - name: Build and sign Windows NSIS installer
+        run: bun run tauri build --bundles nsis --config "${{ steps.windows-signing.outputs.config }}"
+      - name: Verify, install, uninstall, and stage Windows asset
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $binary = Get-Item "src-tauri/target/release/openmind.exe"
+          $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" | Select-Object -First 1
+          foreach ($file in @($binary, $installer)) {
+            $signature = Get-AuthenticodeSignature $file.FullName
+            if ($signature.Status -ne "Valid") { throw "$($file.Name) signature status is $($signature.Status)" }
+          }
+          $installRoot = Join-Path $env:RUNNER_TEMP "openmind-signed-install-smoke"
+          $install = Start-Process $installer.FullName -ArgumentList "/S", "/D=$installRoot" -Wait -PassThru -WindowStyle Hidden
+          if ($install.ExitCode -ne 0) { throw "NSIS install failed with exit code $($install.ExitCode)" }
+          $installedApp = Get-ChildItem $installRoot -Recurse -Filter "openmind.exe" | Select-Object -First 1
+          if (-not $installedApp) { throw "Installed Openmind executable was not found" }
+          if ((Get-AuthenticodeSignature $installedApp.FullName).Status -ne "Valid") { throw "Installed executable signature is not valid" }
+          $uninstaller = Get-ChildItem $installRoot -Recurse -Filter "uninstall.exe" | Select-Object -First 1
+          if (-not $uninstaller) { throw "NSIS uninstaller was not found" }
+          $uninstall = Start-Process $uninstaller.FullName -ArgumentList "/S" -Wait -PassThru -WindowStyle Hidden
+          if ($uninstall.ExitCode -ne 0) { throw "NSIS uninstall failed with exit code $($uninstall.ExitCode)" }
+          for ($attempt = 0; $attempt -lt 60 -and (Test-Path $installedApp.FullName); $attempt++) {
+            Start-Sleep -Milliseconds 500
+          }
+          if (Test-Path $installedApp.FullName) { throw "NSIS uninstall left the application executable behind" }
+          New-Item -ItemType Directory -Force "release-assets" | Out-Null
+          Copy-Item $installer.FullName "release-assets/Openmind_$($env:RELEASE_TAG.TrimStart('v'))_windows_x64_setup.exe"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: signed-windows-x64
+          path: release-assets/*
+          if-no-files-found: error
+
+  draft-release:
+    name: Create draft release
+    needs: [macos, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          pattern: signed-*
+          path: downloaded-assets
+      - name: Collect assets and write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          find downloaded-assets -maxdepth 2 -type f -exec cp '{}' release-assets/ \;
+          bun run release:checksums release-assets
+      - name: Create unpublished draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::A GitHub release already exists for $RELEASE_TAG. Refusing to replace it."
+            exit 1
+          fi
+          printf '%s\n' \
+            "Signed desktop engineering build for review." \
+            "" \
+            "This release is a draft. Verify the installers on clean Windows and macOS devices before publication. It does not establish clinical release readiness." \
+            > release-notes.md
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --draft \
+            --verify-tag \
+            --title "Openmind $RELEASE_TAG" \
+            --notes-file release-notes.md
