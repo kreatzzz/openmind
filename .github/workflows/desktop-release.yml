@@ -92,9 +92,9 @@ jobs:
           security list-keychains -d user -s "$keychain"
           security find-identity -v -p codesigning "$keychain" | grep -F "$APPLE_SIGNING_IDENTITY"
           rm "$certificate"
-      - name: Build signed macOS bundles
-        run: bun run tauri build --bundles app,dmg
-      - name: Notarize, staple, verify, and stage macOS assets
+      - name: Build signed macOS app
+        run: bun run tauri build --bundles app
+      - name: Notarize app, create signed DMG, verify, and stage macOS assets
         shell: bash
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -103,22 +103,46 @@ jobs:
         run: |
           set -euo pipefail
           app_path="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
-          dmg_path="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
           test -n "$app_path"
-          test -n "$dmg_path"
           notary_zip="$RUNNER_TEMP/Openmind-notarization.zip"
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "$notary_zip"
           xcrun notarytool submit "$notary_zip" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
           xcrun stapler staple "$app_path"
-          xcrun notarytool submit "$dmg_path" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
-          xcrun stapler staple "$dmg_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
           spctl --assess --type execute --verbose=2 "$app_path"
           xcrun stapler validate "$app_path"
+
+          dmg_root="$RUNNER_TEMP/openmind-dmg"
+          mkdir -p "$dmg_root" release-assets
+          ditto "$app_path" "$dmg_root/Openmind.app"
+          ln -s /Applications "$dmg_root/Applications"
+          dmg_path="release-assets/Openmind_${RELEASE_TAG#v}_macos_arm64.dmg"
+          hdiutil create -volname "Openmind" -srcfolder "$dmg_root" -ov -format UDZO "$dmg_path"
+          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg_path"
+          xcrun notarytool submit "$dmg_path" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$dmg_path"
+          codesign --verify --verbose=2 "$dmg_path"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg_path"
           xcrun stapler validate "$dmg_path"
-          mkdir -p release-assets
+
+          mount_dir="$(mktemp -d)"
+          mount_output="$(hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir")"
+          device="$(printf '%s\n' "$mount_output" | awk '/^\/dev\// { print $1; exit }')"
+          test -n "$device"
+          cleanup_mount() {
+            hdiutil detach "$device" >/dev/null
+            rmdir "$mount_dir"
+          }
+          trap cleanup_mount EXIT
+          mounted_app="$mount_dir/Openmind.app"
+          test -d "$mounted_app"
+          codesign --verify --deep --strict --verbose=2 "$mounted_app"
+          spctl --assess --type execute --verbose=2 "$mounted_app"
+          xcrun stapler validate "$mounted_app"
+          cleanup_mount
+          trap - EXIT
+
           ditto -c -k --sequesterRsrc --keepParent "$app_path" release-assets/Openmind_${RELEASE_TAG#v}_macos_arm64.app.zip
-          cp "$dmg_path" release-assets/Openmind_${RELEASE_TAG#v}_macos_arm64.dmg
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: signed-macos-arm64
@@ -205,6 +229,7 @@ jobs:
           if ((Get-AuthenticodeSignature $installedApp.FullName).Status -ne "Valid") { throw "Installed executable signature is not valid" }
           $uninstaller = Get-ChildItem $installRoot -Recurse -Filter "uninstall.exe" | Select-Object -First 1
           if (-not $uninstaller) { throw "NSIS uninstaller was not found" }
+          if ((Get-AuthenticodeSignature $uninstaller.FullName).Status -ne "Valid") { throw "NSIS uninstaller signature is not valid" }
           $uninstall = Start-Process $uninstaller.FullName -ArgumentList "/S" -Wait -PassThru -WindowStyle Hidden
           if ($uninstall.ExitCode -ne 0) { throw "NSIS uninstall failed with exit code $($uninstall.ExitCode)" }
           for ($attempt = 0; $attempt -lt 60 -and (Test-Path $installedApp.FullName); $attempt++) {
