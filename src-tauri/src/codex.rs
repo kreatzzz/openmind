@@ -8,6 +8,7 @@ use crate::{
 use serde_json::{json, Map, Value};
 use std::{
     collections::{HashMap, VecDeque},
+    path::PathBuf,
     process::Stdio,
     time::Duration,
 };
@@ -77,7 +78,8 @@ impl Client {
         let instructions = scratch.path().join("instructions.txt");
         std::fs::write(&instructions, provider::SYSTEM_PROMPT)
             .map_err(|_| ProviderError::CodexUnavailable)?;
-        let mut command = Command::new("codex");
+        let executable = discover_executable().await?;
+        let mut command = Command::new(executable);
         command
             .args(["app-server", "--stdio"])
             .current_dir(scratch.path())
@@ -267,6 +269,102 @@ impl Client {
     }
 }
 
+async fn discover_executable() -> Result<PathBuf, ProviderError> {
+    let executable_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+    let mut candidates = Vec::new();
+    if let Ok(explicit) = std::env::var("OPENMIND_CODEX_PATH") {
+        if !explicit.trim().is_empty() {
+            candidates.push(PathBuf::from(explicit));
+        }
+    }
+    if let Ok(current) = std::env::current_exe() {
+        for ancestor in current.ancestors().take(5) {
+            candidates.push(ancestor.join(executable_name));
+            candidates.push(ancestor.join("resources").join(executable_name));
+            candidates.push(ancestor.join("bin").join(executable_name));
+        }
+    }
+    if cfg!(windows) {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(
+                PathBuf::from(local_app_data)
+                    .join("OpenAI")
+                    .join("Codex")
+                    .join("bin")
+                    .join(executable_name),
+            );
+        }
+    } else if cfg!(target_os = "macos") {
+        candidates.push(PathBuf::from(
+            "/Applications/Codex.app/Contents/Resources/codex",
+        ));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates
+            .extend(std::env::split_paths(&path).map(|directory| directory.join(executable_name)));
+    }
+    candidates.dedup();
+    let mut saw_unsupported = false;
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        let version = tokio::time::timeout(
+            Duration::from_secs(5),
+            Command::new(&candidate).arg("--version").output(),
+        )
+        .await;
+        let Ok(Ok(version)) = version else { continue };
+        if !version.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&version.stdout);
+        if !supported_version(&text) {
+            saw_unsupported = true;
+            continue;
+        }
+        let help = tokio::time::timeout(
+            Duration::from_secs(5),
+            Command::new(&candidate)
+                .args(["app-server", "--help"])
+                .output(),
+        )
+        .await;
+        let Ok(Ok(help)) = help else { continue };
+        let help_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&help.stdout),
+            String::from_utf8_lossy(&help.stderr)
+        );
+        if help.status.success() && help_text.contains("--stdio") {
+            return Ok(candidate);
+        }
+        saw_unsupported = true;
+    }
+    if saw_unsupported {
+        Err(ProviderError::CodexUnsupported)
+    } else {
+        Err(ProviderError::CodexUnavailable)
+    }
+}
+
+fn supported_version(output: &str) -> bool {
+    let Some(version) = output
+        .split_whitespace()
+        .find(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
+    else {
+        return false;
+    };
+    let mut numbers = version
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u32>().ok());
+    let (Some(major), Some(minor)) = (numbers.next(), numbers.next()) else {
+        return false;
+    };
+    major >= 1 || (major == 0 && minor >= 154)
+}
+
 fn disabled_servers(config: &Value) -> Result<Map<String, Value>, ProviderError> {
     let mut overrides = Map::new();
     if let Some(servers) = config
@@ -337,6 +435,14 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, ProviderError> {
     })
     .await
     .map_err(|_| ProviderError::Timeout)?
+}
+
+pub async fn health(model: &str) -> Result<(), ProviderError> {
+    let models = list_models().await?;
+    if model.trim().is_empty() || !models.iter().any(|candidate| candidate.name == model) {
+        return Err(ProviderError::InvalidModel);
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -554,6 +660,14 @@ pub async fn extract_notes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_version_gate_rejects_ambiguous_legacy_cli() {
+        assert!(!supported_version("codex-cli 0.130.0"));
+        assert!(supported_version("codex-cli 0.154.0-alpha.6.2"));
+        assert!(supported_version("codex 1.0.0"));
+        assert!(!supported_version("unknown"));
+    }
 
     #[test]
     fn inherited_servers_require_explicit_disabling_and_runtime_verification() {

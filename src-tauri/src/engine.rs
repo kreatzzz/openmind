@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    app_settings::{LineWidth, NoteJob, ProviderSettings, ReadingSettings},
     models::{Message, MessageRole, MessageStatus, Session},
     notes::{MemoryRecord, NotePatch, NotesInput, UserNote},
     vault::Vault,
@@ -20,6 +21,27 @@ pub enum ProviderKind {
     #[default]
     Ollama,
     Codex,
+    #[serde(rename = "openaiCompatible")]
+    OpenAiCompatible,
+}
+
+impl ProviderKind {
+    pub(crate) fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::Codex => "codex",
+            Self::OpenAiCompatible => "openai_compatible",
+        }
+    }
+
+    pub(crate) fn from_db_value(value: &str) -> Option<Self> {
+        match value {
+            "ollama" => Some(Self::Ollama),
+            "codex" => Some(Self::Codex),
+            "openai_compatible" => Some(Self::OpenAiCompatible),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -295,6 +317,95 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
+    pub fn provider_settings(&self) -> Result<ProviderSettings, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .provider_settings()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn provider_api_key(&self) -> Result<Option<zeroize::Zeroizing<String>>, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .provider_api_key()
+            .map_err(|error| error.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_provider_settings(
+        &self,
+        provider: ProviderKind,
+        base_url: &str,
+        model: &str,
+        remote_data_consent: bool,
+        expected_revision: i64,
+        api_key: Option<&str>,
+        clear_api_key: bool,
+    ) -> Result<ProviderSettings, String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop current model work before changing provider settings.".into());
+        }
+        state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .update_provider_settings(
+                provider,
+                base_url,
+                model,
+                remote_data_consent,
+                expected_revision,
+                api_key,
+                clear_api_key,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn reading_settings(&self) -> Result<ReadingSettings, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .reading_settings()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn update_reading_settings(
+        &self,
+        text_scale_percent: u16,
+        line_width: LineWidth,
+        reduce_motion: bool,
+        enter_to_send: bool,
+        expected_revision: i64,
+    ) -> Result<ReadingSettings, String> {
+        self.state()?
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .update_reading_settings(
+                text_scale_percent,
+                line_width,
+                reduce_motion,
+                enter_to_send,
+                expected_revision,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn list_note_jobs(&self) -> Result<Vec<NoteJob>, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .list_note_jobs()
+            .map_err(|error| error.to_string())
+    }
+
     pub fn create_session(&self) -> Result<Session, String> {
         self.state()?
             .vault
@@ -358,12 +469,30 @@ impl Engine {
         remote_consent: bool,
     ) -> Result<PreparedTurn, String> {
         let mut state = self.state()?;
-        authorize_provider(&state, provider, remote_consent)?;
+        let settings = state
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .provider_settings()
+            .map_err(|error| error.to_string())?;
+        if provider != settings.provider || remote_consent != settings.remote_data_consent {
+            return Err("Provider settings changed. Refresh settings before sending.".into());
+        }
+        authorize_provider(&state, &settings)?;
         if content.trim().is_empty() || content.len() > 6_000 {
             return Err("Write a message of up to 6,000 UTF-8 bytes before sending.".into());
         }
-        if state.active.is_some() || state.notes_active.is_some() {
+        if state.active.is_some() {
             return Err("Wait for the current reply to finish, or stop it first.".into());
+        }
+        if let Some(notes) = state.notes_active.take() {
+            notes.cancel.cancel();
+            state
+                .vault
+                .as_mut()
+                .ok_or("Unlock your vault first.")?
+                .defer_notes(&notes.message_id)
+                .map_err(|error| error.to_string())?;
         }
         let vault = state.vault.as_mut().ok_or("Unlock your vault first.")?;
         let session = vault
@@ -383,6 +512,15 @@ impl Engine {
         };
         let (user, assistant) = vault
             .begin_turn(session_id, content)
+            .map_err(|error| error.to_string())?;
+        vault
+            .set_notes_job_provider(
+                &assistant.id,
+                settings.provider,
+                &settings.base_url,
+                &settings.model,
+                settings.remote_data_consent,
+            )
             .map_err(|error| error.to_string())?;
         history.push(user.clone());
         // Always keep the current input intact. Saved context gets only spare room.
@@ -482,6 +620,15 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
+    pub fn notes_provider_settings(&self, message_id: &str) -> Result<ProviderSettings, String> {
+        self.state()?
+            .vault
+            .as_ref()
+            .ok_or("Unlock your vault first.")?
+            .notes_provider_settings(message_id)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn edit_memory(
         &self,
         id: &str,
@@ -552,7 +699,16 @@ impl Engine {
         // structured call is intentionally skipped, including remote-provider
         // authorization, because no source data will leave the vault.
         if call_required {
-            authorize_provider(&state, provider, remote_consent)?;
+            let settings = state
+                .vault
+                .as_ref()
+                .ok_or("Unlock your vault first.")?
+                .notes_provider_settings(message_id)
+                .map_err(|error| error.to_string())?;
+            if provider != settings.provider || remote_consent != settings.remote_data_consent {
+                return Err("The saved notes job has different provider settings.".into());
+            }
+            authorize_provider(&state, &settings)?;
         }
         prepare_notes_locked(&mut state, message_id)
     }
@@ -596,21 +752,28 @@ impl Engine {
     }
 }
 
-fn authorize_provider(
-    state: &State,
-    provider: ProviderKind,
-    remote_consent: bool,
-) -> Result<(), String> {
-    if provider != ProviderKind::Codex {
-        return Ok(());
+fn authorize_provider(state: &State, settings: &ProviderSettings) -> Result<(), String> {
+    match settings.provider {
+        ProviderKind::Ollama => Ok(()),
+        ProviderKind::Codex => {
+            if !state.is_demo {
+                return Err(CODEX_DEMO_ONLY_ERROR.into());
+            }
+            if !settings.remote_data_consent {
+                return Err(CODEX_CONSENT_REQUIRED_ERROR.into());
+            }
+            Ok(())
+        }
+        ProviderKind::OpenAiCompatible => {
+            if !settings.remote_data_consent {
+                return Err("Confirm remote processing before using this provider.".into());
+            }
+            if !settings.credential_present {
+                return Err("Add an API key before using this provider.".into());
+            }
+            Ok(())
+        }
     }
-    if !state.is_demo {
-        return Err(CODEX_DEMO_ONLY_ERROR.into());
-    }
-    if !remote_consent {
-        return Err(CODEX_CONSENT_REQUIRED_ERROR.into());
-    }
-    Ok(())
 }
 
 fn finish_turn_locked(
@@ -887,11 +1050,6 @@ mod tests {
         assert!(second.status == MessageStatus::Complete);
         // The global saved bundle is skipped before retrieval for this
         // conversation, while its ordinary transcript remains available.
-        let turn_history_memory = engine
-            .prepare_turn(&session.id, "should be blocked while notes active")
-            .err()
-            .expect("notes work blocks another turn");
-        assert!(turn_history_memory.contains("current reply"));
         let second_notes = second.notes.unwrap().unwrap();
         assert!(!second_notes.input.memory_enabled);
         assert!(second_notes.input.notes_enabled);
@@ -1112,6 +1270,19 @@ mod tests {
             ProviderKind::Ollama
         );
 
+        let defaults = engine.provider_settings().unwrap();
+        let codex_settings = engine
+            .update_provider_settings(
+                ProviderKind::Codex,
+                "",
+                "synthetic-model",
+                true,
+                defaults.revision,
+                None,
+                false,
+            )
+            .unwrap();
+
         let error = engine
             .prepare_turn_with_provider(
                 &session.id,
@@ -1125,17 +1296,24 @@ mod tests {
         assert!(engine.list_messages(&session.id).unwrap().is_empty());
         assert_eq!(engine.require_demo().unwrap_err(), DEMO_REQUIRED_ERROR);
 
+        engine
+            .update_provider_settings(
+                ProviderKind::Ollama,
+                "http://127.0.0.1:11434",
+                "synthetic-model",
+                false,
+                codex_settings.revision,
+                None,
+                false,
+            )
+            .unwrap();
+
         let turn = engine
             .prepare_turn(&session.id, "A synthetic Ollama turn.")
             .unwrap();
         engine
             .finish_turn(&turn.assistant.id, MessageStatus::Complete)
             .unwrap();
-        let error = engine
-            .prepare_notes_with_provider(&turn.assistant.id, ProviderKind::Codex, true)
-            .err()
-            .expect("personal Codex notes should be rejected");
-        assert_eq!(error, CODEX_DEMO_ONLY_ERROR);
         let ollama_notes = engine
             .prepare_notes(&turn.assistant.id)
             .unwrap()
@@ -1147,6 +1325,18 @@ mod tests {
         assert!(engine.require_demo().is_ok());
         let demo_session = engine.list_sessions().unwrap().remove(0);
         let before = engine.list_messages(&demo_session.id).unwrap().len();
+        let defaults = engine.provider_settings().unwrap();
+        let no_consent = engine
+            .update_provider_settings(
+                ProviderKind::Codex,
+                "",
+                "synthetic-model",
+                false,
+                defaults.revision,
+                None,
+                false,
+            )
+            .unwrap();
         let error = engine
             .prepare_turn_with_provider(
                 &demo_session.id,
@@ -1161,6 +1351,18 @@ mod tests {
             engine.list_messages(&demo_session.id).unwrap().len(),
             before
         );
+
+        engine
+            .update_provider_settings(
+                ProviderKind::Codex,
+                "",
+                "synthetic-model",
+                true,
+                no_consent.revision,
+                None,
+                false,
+            )
+            .unwrap();
 
         let allowed = engine
             .prepare_turn_with_provider(
@@ -1196,7 +1398,6 @@ mod tests {
             .finish_turn(&turn.assistant.id, MessageStatus::Complete)
             .unwrap();
         let old = engine.prepare_notes(&turn.assistant.id).unwrap().unwrap();
-        assert!(engine.prepare_turn(&session.id, "Another message").is_err());
         engine.lock().unwrap();
         assert!(old.cancel.is_cancelled());
         engine.unlock(PASSPHRASE, false).unwrap();
@@ -1242,25 +1443,21 @@ mod tests {
             .expect("notes reservation should succeed")
             .expect("completed turn should reserve notes");
 
-        assert!(engine
-            .prepare_turn(&session.id, "A second message")
-            .is_err());
-        engine.cancel_turn().unwrap();
-        assert!(notes.cancel.is_cancelled());
-        assert!(matches!(
-            engine.finish_notes(&notes.attempt_id, None).unwrap(),
-            Some(NotesStatus::Failed)
-        ));
-
-        let messages = engine.list_messages(&session.id).unwrap();
-        assert_eq!(messages[1].status, MessageStatus::Complete);
         let next = engine
             .prepare_turn(&session.id, "A second message")
             .unwrap();
+        assert!(notes.cancel.is_cancelled());
+        assert!(engine
+            .finish_notes(&notes.attempt_id, None)
+            .unwrap()
+            .is_none());
         engine.cancel_turn().unwrap();
         engine
             .finish_turn(&next.assistant.id, MessageStatus::Interrupted)
             .unwrap();
+
+        let messages = engine.list_messages(&session.id).unwrap();
+        assert_eq!(messages[1].status, MessageStatus::Complete);
     }
 
     #[test]
@@ -1442,5 +1639,50 @@ mod tests {
         let messages = engine.list_messages(&session.id).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].status, MessageStatus::Interrupted);
+    }
+
+    #[test]
+    fn foreground_turn_defers_notes_and_late_attempt_cannot_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let session = engine.create_session().unwrap();
+        let first = engine
+            .prepare_turn(&session.id, "I want to take a walk.")
+            .unwrap();
+        engine
+            .finish_turn(&first.assistant.id, MessageStatus::Complete)
+            .unwrap();
+        let notes = engine.prepare_notes(&first.assistant.id).unwrap().unwrap();
+
+        let second = engine
+            .prepare_turn(&session.id, "I also want to call a friend.")
+            .unwrap();
+        assert!(notes.cancel.is_cancelled());
+        assert_eq!(
+            engine
+                .finish_notes(&notes.attempt_id, Some(&synthetic_patch()))
+                .unwrap(),
+            None
+        );
+        let jobs = engine.list_note_jobs().unwrap();
+        let deferred = jobs
+            .iter()
+            .find(|job| job.message_id == first.assistant.id)
+            .unwrap();
+        assert_eq!(deferred.status, "pending");
+        assert_eq!(
+            deferred.last_error_code.as_deref(),
+            Some("foreground_preempted")
+        );
+        engine.cancel_turn().unwrap();
+        engine
+            .finish_turn(&second.assistant.id, MessageStatus::Interrupted)
+            .unwrap();
+        let retry = engine.prepare_notes(&first.assistant.id).unwrap().unwrap();
+        engine
+            .finish_notes(&retry.attempt_id, Some(&synthetic_patch()))
+            .unwrap();
+        assert_eq!(engine.list_notes().unwrap().len(), 1);
     }
 }

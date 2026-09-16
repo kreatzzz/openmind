@@ -18,6 +18,10 @@ use crate::notes::{
     MemoryEvidenceState, MemoryKind, MemoryRecord, NoteKind, NotePatch, NotesInput, UserNote,
     MAX_CANDIDATE_CONTENT_CHARS, MAX_EVIDENCE_QUOTE_CHARS,
 };
+use crate::{
+    app_settings::{LineWidth, NoteJob, ProviderSettings, ReadingSettings, DEFAULT_OLLAMA_URL},
+    engine::ProviderKind,
+};
 
 pub const DATABASE_FILE_NAME: &str = "vault.db";
 pub const ENVELOPE_FILE_NAME: &str = "vault.key";
@@ -30,7 +34,7 @@ pub const MAX_ASSISTANT_CHUNK_CHARS: usize = 32_000;
 pub const MAX_ASSISTANT_MESSAGE_CHARS: usize = 200_000;
 pub const MAX_SESSION_TITLE_CHARS: usize = 120;
 
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 const DB_KEY_LENGTH: usize = 32;
 const ENVELOPE_SALT_LENGTH: usize = 16;
 const ENVELOPE_NONCE_LENGTH: usize = 24;
@@ -70,6 +74,7 @@ pub enum VaultError {
     NotesJobNotFound,
     NotesJobAlreadyRunning,
     NotesAlreadyComplete,
+    NotesRetryExhausted,
     NotesSourceNotFound,
     InvalidNotesPatch,
     MemoryNotFound,
@@ -113,6 +118,7 @@ impl fmt::Display for VaultError {
             Self::NotesJobNotFound => formatter.write_str("notes job not found"),
             Self::NotesJobAlreadyRunning => formatter.write_str("notes job is already running"),
             Self::NotesAlreadyComplete => formatter.write_str("notes job is already complete"),
+            Self::NotesRetryExhausted => formatter.write_str("notes job reached its retry limit"),
             Self::NotesSourceNotFound => formatter.write_str("notes source message not found"),
             Self::InvalidNotesPatch => formatter.write_str("notes patch is invalid"),
             Self::MemoryNotFound => formatter.write_str("memory not found"),
@@ -306,6 +312,225 @@ impl Vault {
     pub fn exists<P: AsRef<Path>>(dir: P) -> bool {
         let dir = dir.as_ref();
         dir.join(DATABASE_FILE_NAME).exists() || dir.join(ENVELOPE_FILE_NAME).exists()
+    }
+
+    pub fn provider_settings(&self) -> Result<ProviderSettings> {
+        self.connection
+            .query_row(
+                "SELECT provider, base_url, model, remote_data_consent,
+                    api_key IS NOT NULL, revision
+             FROM provider_settings WHERE id = 1",
+                [],
+                |row| {
+                    let provider: String = row.get(0)?;
+                    Ok(ProviderSettings {
+                        provider: ProviderKind::from_db_value(&provider)
+                            .ok_or(rusqlite::Error::InvalidQuery)?,
+                        base_url: row.get(1)?,
+                        model: row.get(2)?,
+                        remote_data_consent: db_bool_from_row(row, 3)?,
+                        credential_present: db_bool_from_row(row, 4)?,
+                        revision: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn provider_api_key(&self) -> Result<Option<Zeroizing<String>>> {
+        let value: Option<String> = self.connection.query_row(
+            "SELECT api_key FROM provider_settings WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(value.map(Zeroizing::new))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_provider_settings(
+        &mut self,
+        provider: ProviderKind,
+        base_url: &str,
+        model: &str,
+        remote_data_consent: bool,
+        expected_revision: i64,
+        api_key: Option<&str>,
+        clear_api_key: bool,
+    ) -> Result<ProviderSettings> {
+        if base_url.len() > 2 * 1024 || model.len() > 256 || model.chars().any(char::is_control) {
+            return Err(VaultError::InvalidInput("provider settings are invalid"));
+        }
+        if api_key.is_some_and(|value| value.trim().is_empty() || value.len() > 16 * 1024) {
+            return Err(VaultError::InvalidInput("provider credential is invalid"));
+        }
+        if expected_revision < 1 || (api_key.is_some() && clear_api_key) {
+            return Err(VaultError::InvalidInput(
+                "provider settings revision is invalid",
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        let changed = if clear_api_key {
+            transaction.execute(
+                "UPDATE provider_settings SET provider=?1, base_url=?2, model=?3,
+                        remote_data_consent=?4, api_key=NULL, revision=revision+1
+                 WHERE id=1 AND revision=?5",
+                params![
+                    provider.as_db_value(),
+                    base_url,
+                    model,
+                    remote_data_consent as i64,
+                    expected_revision
+                ],
+            )?
+        } else if let Some(api_key) = api_key {
+            transaction.execute(
+                "UPDATE provider_settings SET provider=?1, base_url=?2, model=?3,
+                        remote_data_consent=?4, api_key=?5, revision=revision+1
+                 WHERE id=1 AND revision=?6",
+                params![
+                    provider.as_db_value(),
+                    base_url,
+                    model,
+                    remote_data_consent as i64,
+                    api_key,
+                    expected_revision
+                ],
+            )?
+        } else {
+            transaction.execute(
+                "UPDATE provider_settings SET provider=?1, base_url=?2, model=?3,
+                        remote_data_consent=?4, revision=revision+1
+                 WHERE id=1 AND revision=?5",
+                params![
+                    provider.as_db_value(),
+                    base_url,
+                    model,
+                    remote_data_consent as i64,
+                    expected_revision
+                ],
+            )?
+        };
+        if changed != 1 {
+            return Err(VaultError::RevisionConflict);
+        }
+        transaction.commit()?;
+        self.provider_settings()
+    }
+
+    pub fn reading_settings(&self) -> Result<ReadingSettings> {
+        self.connection
+            .query_row(
+                "SELECT text_scale_percent, line_width, reduce_motion, enter_to_send, revision
+             FROM reading_settings WHERE id = 1",
+                [],
+                |row| {
+                    let width: String = row.get(1)?;
+                    let line_width = match width.as_str() {
+                        "compact" => LineWidth::Compact,
+                        "comfortable" => LineWidth::Comfortable,
+                        "wide" => LineWidth::Wide,
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    };
+                    Ok(ReadingSettings {
+                        text_scale_percent: row.get(0)?,
+                        line_width,
+                        reduce_motion: db_bool_from_row(row, 2)?,
+                        enter_to_send: db_bool_from_row(row, 3)?,
+                        revision: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn update_reading_settings(
+        &mut self,
+        text_scale_percent: u16,
+        line_width: LineWidth,
+        reduce_motion: bool,
+        enter_to_send: bool,
+        expected_revision: i64,
+    ) -> Result<ReadingSettings> {
+        if !(75..=200).contains(&text_scale_percent) || expected_revision < 1 {
+            return Err(VaultError::InvalidInput("reading settings are invalid"));
+        }
+        let width = match line_width {
+            LineWidth::Compact => "compact",
+            LineWidth::Comfortable => "comfortable",
+            LineWidth::Wide => "wide",
+        };
+        let changed = self.connection.execute(
+            "UPDATE reading_settings SET text_scale_percent=?1, line_width=?2,
+                    reduce_motion=?3, enter_to_send=?4, revision=revision+1
+             WHERE id=1 AND revision=?5",
+            params![
+                text_scale_percent,
+                width,
+                reduce_motion as i64,
+                enter_to_send as i64,
+                expected_revision
+            ],
+        )?;
+        if changed != 1 {
+            return Err(VaultError::RevisionConflict);
+        }
+        self.reading_settings()
+    }
+
+    pub fn list_note_jobs(&self) -> Result<Vec<NoteJob>> {
+        let mut statement = self.connection.prepare(
+            "SELECT assistant_message_id, status, attempt_count, next_attempt_at,
+                    last_error_code, memory_enabled, notes_enabled, provider,
+                    model, created_at, updated_at
+             FROM notes_jobs ORDER BY created_at DESC, assistant_message_id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let provider: String = row.get(7)?;
+            Ok(NoteJob {
+                message_id: row.get(0)?,
+                status: row.get(1)?,
+                attempt_count: row.get(2)?,
+                next_attempt_at: row.get(3)?,
+                last_error_code: row.get(4)?,
+                memory_enabled: db_bool_from_row(row, 5)?,
+                notes_enabled: db_bool_from_row(row, 6)?,
+                provider: ProviderKind::from_db_value(&provider)
+                    .ok_or(rusqlite::Error::InvalidQuery)?,
+                model: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn set_notes_job_provider(
+        &mut self,
+        assistant_id: &str,
+        provider: ProviderKind,
+        base_url: &str,
+        model: &str,
+        remote_data_consent: bool,
+    ) -> Result<()> {
+        let assistant_id = canonical_id(assistant_id, "assistant message ID")?;
+        let changed = self.connection.execute(
+            "UPDATE notes_jobs SET provider=?1, base_url=?2, model=?3,
+                    remote_data_consent=?4, updated_at=?5
+             WHERE assistant_message_id=?6 AND status='pending'",
+            params![
+                provider.as_db_value(),
+                base_url,
+                model,
+                remote_data_consent as i64,
+                now_rfc3339(),
+                assistant_id
+            ],
+        )?;
+        if changed != 1 {
+            return Err(VaultError::NotesJobNotFound);
+        }
+        Ok(())
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
@@ -722,6 +947,31 @@ impl Vault {
         Ok((db_bool(memory_enabled)?, db_bool(notes_enabled)?))
     }
 
+    pub fn notes_provider_settings(&self, assistant_id: &str) -> Result<ProviderSettings> {
+        let assistant_id = canonical_id(assistant_id, "assistant message ID")?;
+        self.connection
+            .query_row(
+                "SELECT provider, base_url, model, remote_data_consent,
+                    (SELECT api_key IS NOT NULL FROM provider_settings WHERE id=1)
+             FROM notes_jobs WHERE assistant_message_id=?1",
+                [&assistant_id],
+                |row| {
+                    let provider: String = row.get(0)?;
+                    Ok(ProviderSettings {
+                        provider: ProviderKind::from_db_value(&provider)
+                            .ok_or(rusqlite::Error::InvalidQuery)?,
+                        base_url: row.get(1)?,
+                        model: row.get(2)?,
+                        remote_data_consent: db_bool_from_row(row, 3)?,
+                        credential_present: db_bool_from_row(row, 4)?,
+                        revision: 1,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(VaultError::NotesJobNotFound)
+    }
+
     /// Claim the structured derivation job for a completed assistant turn and
     /// return the exact persisted user/assistant pair it may cite.
     pub fn begin_notes(&mut self, assistant_id: &str) -> Result<NotesInput> {
@@ -739,19 +989,21 @@ impl Vault {
             return Err(VaultError::MemorySourceForgotten);
         }
 
-        let (status, memory_enabled, notes_enabled): (String, i64, i64) = transaction
-            .query_row(
-                "SELECT status, memory_enabled, notes_enabled
+        let (status, memory_enabled, notes_enabled, attempt_count): (String, i64, i64, i64) =
+            transaction
+                .query_row(
+                    "SELECT status, memory_enabled, notes_enabled, attempt_count
                  FROM notes_jobs WHERE assistant_message_id = ?1",
-                [&assistant_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?
-            .ok_or(VaultError::NotesJobNotFound)?;
+                    [&assistant_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?
+                .ok_or(VaultError::NotesJobNotFound)?;
         let memory_enabled = db_bool(memory_enabled)?;
         let notes_enabled = db_bool(notes_enabled)?;
         match status.as_str() {
-            "pending" | "failed" => {}
+            "pending" | "failed" if attempt_count < 3 => {}
+            "pending" | "failed" => return Err(VaultError::NotesRetryExhausted),
             "running" => return Err(VaultError::NotesJobAlreadyRunning),
             "complete" => return Err(VaultError::NotesAlreadyComplete),
             _ => return Err(VaultError::CorruptDatabase),
@@ -759,7 +1011,8 @@ impl Vault {
 
         let changed = transaction.execute(
             "UPDATE notes_jobs
-             SET status = 'running', updated_at = ?1
+             SET status = 'running', attempt_count = attempt_count + 1,
+                 next_attempt_at = NULL, last_error_code = NULL, updated_at = ?1
              WHERE assistant_message_id = ?2 AND status IN ('pending', 'failed')",
             params![now_rfc3339(), assistant_id],
         )?;
@@ -797,13 +1050,36 @@ impl Vault {
 
     /// Mark an in-flight derivation failed so it can be explicitly retried.
     pub fn fail_notes(&mut self, assistant_id: &str) -> Result<()> {
+        self.fail_notes_with_code(assistant_id, "provider_failed")
+    }
+
+    pub fn fail_notes_with_code(&mut self, assistant_id: &str, code: &str) -> Result<()> {
         let assistant_id = canonical_id(assistant_id, "assistant message ID")?;
+        if code.is_empty()
+            || code.len() > 64
+            || !code
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        {
+            return Err(VaultError::InvalidInput("notes failure code is invalid"));
+        }
         let transaction = self.connection.transaction()?;
+        let attempt_count: i64 = transaction.query_row(
+            "SELECT attempt_count FROM notes_jobs WHERE assistant_message_id=?1 AND status='running'",
+            [&assistant_id], |row| row.get(0),
+        ).optional()?.ok_or(VaultError::NotesJobNotFound)?;
+        let delay_seconds = match attempt_count {
+            0 | 1 => 5,
+            2 => 30,
+            _ => 120,
+        };
+        let next_attempt = (Utc::now() + chrono::Duration::seconds(delay_seconds))
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
         let changed = transaction.execute(
             "UPDATE notes_jobs
-             SET status = 'failed', updated_at = ?1
-             WHERE assistant_message_id = ?2 AND status = 'running'",
-            params![now_rfc3339(), assistant_id],
+             SET status = 'failed', last_error_code = ?1, next_attempt_at=?2, updated_at = ?3
+             WHERE assistant_message_id = ?4 AND status = 'running'",
+            params![code, next_attempt, now_rfc3339(), assistant_id],
         )?;
         if changed != 1 {
             let status: Option<String> = transaction
@@ -821,6 +1097,21 @@ impl Vault {
             };
         }
         transaction.commit()?;
+        Ok(())
+    }
+
+    /// Yield a running notes attempt to foreground chat without losing it.
+    pub fn defer_notes(&mut self, assistant_id: &str) -> Result<()> {
+        let assistant_id = canonical_id(assistant_id, "assistant message ID")?;
+        let changed = self.connection.execute(
+            "UPDATE notes_jobs SET status='pending', next_attempt_at=NULL,
+                    last_error_code='foreground_preempted', updated_at=?1
+             WHERE assistant_message_id=?2 AND status='running'",
+            params![now_rfc3339(), assistant_id],
+        )?;
+        if changed != 1 {
+            return Err(VaultError::NotesJobNotFound);
+        }
         Ok(())
     }
 
@@ -1630,8 +1921,10 @@ fn initialize_schema(connection: &Connection) -> Result<()> {
          CREATE INDEX messages_session_created_idx
              ON messages (session_id, created_at, id);
          {notes_schema}
+         {settings_schema}
          PRAGMA user_version = {SCHEMA_VERSION};",
         notes_schema = notes_schema_sql(),
+        settings_schema = settings_schema_sql(),
     );
     connection.execute_batch(&schema)?;
     Ok(())
@@ -1646,6 +1939,13 @@ fn notes_schema_sql() -> String {
              updated_at TEXT NOT NULL,
              memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0, 1)),
              notes_enabled INTEGER NOT NULL DEFAULT 1 CHECK (notes_enabled IN (0, 1)),
+             provider TEXT NOT NULL DEFAULT 'ollama' CHECK (provider IN ('ollama', 'codex', 'openai_compatible')),
+             base_url TEXT NOT NULL DEFAULT '',
+             model TEXT NOT NULL DEFAULT '',
+             remote_data_consent INTEGER NOT NULL DEFAULT 0 CHECK (remote_data_consent IN (0, 1)),
+             attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+             next_attempt_at TEXT,
+             last_error_code TEXT,
              FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
          );
          CREATE INDEX notes_jobs_status_idx ON notes_jobs (status, updated_at);
@@ -1671,6 +1971,63 @@ fn notes_schema_sql() -> String {
         MAX_QUOTE = MAX_EVIDENCE_QUOTE_CHARS,
         memory_schema = memory_schema_sql(),
     )
+}
+
+fn settings_schema_sql() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS provider_settings (
+             id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+             provider TEXT NOT NULL CHECK (provider IN ('ollama', 'codex', 'openai_compatible')),
+             base_url TEXT NOT NULL,
+             model TEXT NOT NULL,
+             remote_data_consent INTEGER NOT NULL CHECK (remote_data_consent IN (0, 1)),
+             api_key TEXT,
+             revision INTEGER NOT NULL CHECK (revision >= 1)
+         );
+         INSERT OR IGNORE INTO provider_settings
+             (id, provider, base_url, model, remote_data_consent, api_key, revision)
+         VALUES (1, 'ollama', '{DEFAULT_OLLAMA_URL}', '', 0, NULL, 1);
+         CREATE TABLE IF NOT EXISTS reading_settings (
+             id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+             text_scale_percent INTEGER NOT NULL CHECK (text_scale_percent BETWEEN 75 AND 200),
+             line_width TEXT NOT NULL CHECK (line_width IN ('compact', 'comfortable', 'wide')),
+             reduce_motion INTEGER NOT NULL CHECK (reduce_motion IN (0, 1)),
+             enter_to_send INTEGER NOT NULL CHECK (enter_to_send IN (0, 1)),
+             revision INTEGER NOT NULL CHECK (revision >= 1)
+         );
+         INSERT OR IGNORE INTO reading_settings
+             (id, text_scale_percent, line_width, reduce_motion, enter_to_send, revision)
+         VALUES (1, 100, 'comfortable', 0, 1, 1);"
+    )
+}
+
+fn add_reliability_schema(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(&settings_schema_sql())?;
+    for (column, definition) in [
+        ("provider", "TEXT NOT NULL DEFAULT 'ollama' CHECK (provider IN ('ollama', 'codex', 'openai_compatible'))"),
+        ("base_url", "TEXT NOT NULL DEFAULT ''"),
+        ("model", "TEXT NOT NULL DEFAULT ''"),
+        ("remote_data_consent", "INTEGER NOT NULL DEFAULT 0 CHECK (remote_data_consent IN (0, 1))"),
+        ("attempt_count", "INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)"),
+        ("next_attempt_at", "TEXT"),
+        ("last_error_code", "TEXT"),
+    ] {
+        if !table_has_column(transaction, "notes_jobs", column)? {
+            transaction.execute_batch(&format!("ALTER TABLE notes_jobs ADD COLUMN {column} {definition};"))?;
+        }
+    }
+    Ok(())
+}
+
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn memory_records_table_sql() -> String {
@@ -1727,6 +2084,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             let transaction = connection.unchecked_transaction()?;
             transaction.execute_batch(&notes_schema_sql())?;
             add_session_settings(&transaction)?;
+            add_reliability_schema(&transaction)?;
             transaction.execute(
                 "INSERT INTO notes_jobs
                  (assistant_message_id, status, created_at, updated_at)
@@ -1768,6 +2126,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             ))?;
             add_session_settings(&transaction)?;
             add_notes_job_settings(&transaction)?;
+            add_reliability_schema(&transaction)?;
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             transaction.commit()?;
             Ok(())
@@ -1776,6 +2135,14 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             let transaction = connection.unchecked_transaction()?;
             add_session_settings(&transaction)?;
             add_notes_job_settings(&transaction)?;
+            add_reliability_schema(&transaction)?;
+            transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            transaction.commit()?;
+            Ok(())
+        }
+        4 => {
+            let transaction = connection.unchecked_transaction()?;
+            add_reliability_schema(&transaction)?;
             transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             transaction.commit()?;
             Ok(())
@@ -1828,12 +2195,12 @@ fn validate_schema(connection: &Connection) -> Result<()> {
             "SELECT count(*) FROM sqlite_master
              WHERE type = 'table' AND name IN
                  ('sessions', 'messages', 'notes_jobs', 'user_notes', 'memory_records',
-                  'memory_exclusions')",
+                  'memory_exclusions', 'provider_settings', 'reading_settings')",
             [],
             |row| row.get(0),
         )
         .map_err(|_| VaultError::CorruptDatabase)?;
-    if table_count != 6 {
+    if table_count != 8 {
         return Err(VaultError::CorruptDatabase);
     }
     Ok(())
@@ -1847,7 +2214,9 @@ fn recover_interrupted(connection: &Connection) -> Result<()> {
     )?;
     transaction.execute(
         "UPDATE notes_jobs
-         SET status = 'failed', updated_at = ?1
+         SET status = 'pending', next_attempt_at = NULL,
+             last_error_code = CASE WHEN status = 'running' THEN 'restart' ELSE last_error_code END,
+             updated_at = ?1
          WHERE status IN ('pending', 'running')",
         [now_rfc3339()],
     )?;
@@ -2328,7 +2697,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 4);
+        assert_eq!(version, SCHEMA_VERSION as i64);
         assert!(migrated.list_notes().expect("notes").is_empty());
     }
 
@@ -2424,7 +2793,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 4);
+        assert_eq!(version, SCHEMA_VERSION as i64);
     }
 
     #[test]
@@ -2463,7 +2832,7 @@ mod tests {
             .expect("backfilled job");
         // Opening performs restart recovery after the migration, so the
         // backfilled pending job is explicitly retryable as failed.
-        assert_eq!(status, "failed");
+        assert_eq!(status, "pending");
         let input = migrated.begin_notes(&assistant.id).expect("claim backfill");
         assert_eq!(input.assistant.id, assistant.id);
     }
@@ -2534,7 +2903,7 @@ mod tests {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 4);
+        assert_eq!(version, SCHEMA_VERSION as i64);
     }
 
     #[test]
@@ -2898,7 +3267,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_fails_pending_notes_without_deleting_old_records() {
+    fn restart_requeues_pending_notes_without_deleting_old_records() {
         let directory = temp_vault_dir();
         let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
         let session = vault.create_session().expect("session");
@@ -2919,11 +3288,54 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("recovered job");
-        assert_eq!(status, "failed");
+        assert_eq!(status, "pending");
         reopened
             .begin_notes(&assistant.id)
             .expect("retry after restart");
         assert!(reopened.list_notes().expect("old notes").is_empty());
+    }
+
+    #[test]
+    fn encrypted_provider_and_reading_settings_persist_without_exposing_key() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let defaults = vault.provider_settings().expect("provider defaults");
+        assert_eq!(defaults.provider, ProviderKind::Ollama);
+        assert!(!defaults.credential_present);
+        let updated = vault
+            .update_provider_settings(
+                ProviderKind::OpenAiCompatible,
+                "https://provider.example.test/v1",
+                "synthetic-model",
+                true,
+                defaults.revision,
+                Some("synthetic-secret"),
+                false,
+            )
+            .expect("update provider");
+        assert!(updated.credential_present);
+        assert!(!serde_json::to_string(&updated)
+            .unwrap()
+            .contains("synthetic-secret"));
+        let reading = vault.reading_settings().expect("reading defaults");
+        vault
+            .update_reading_settings(125, LineWidth::Wide, true, false, reading.revision)
+            .expect("update reading");
+        drop(vault);
+
+        let reopened = Vault::open(directory.path(), "synthetic passphrase").expect("reopen");
+        let settings = reopened.provider_settings().expect("provider settings");
+        assert_eq!(settings.provider, ProviderKind::OpenAiCompatible);
+        assert_eq!(settings.model, "synthetic-model");
+        assert_eq!(
+            reopened.provider_api_key().unwrap().unwrap().as_str(),
+            "synthetic-secret"
+        );
+        let reading = reopened.reading_settings().expect("reading settings");
+        assert_eq!(reading.text_scale_percent, 125);
+        assert_eq!(reading.line_width, LineWidth::Wide);
+        assert!(reading.reduce_motion);
+        assert!(!reading.enter_to_send);
     }
 
     #[test]

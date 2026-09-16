@@ -8,11 +8,16 @@ use tauri_plugin_notification::NotificationExt;
 use zeroize::Zeroizing;
 
 use crate::{
+    app_settings::{
+        LineWidth, NoteJob, ProviderCapabilities, ProviderDestination, ProviderHealth,
+        ProviderHealthStatus, ProviderSettings, ReadingSettings,
+    },
     codex,
     engine::{Engine, NotesStatus, PreparedNotes, ProviderKind, TurnEvent, VaultStatus},
     models::{Message, MessageRole, MessageStatus, Session},
     notes::{MemoryRecord, UserNote},
     provider::{self, ChatMessage, ModelInfo, ProviderError},
+    remote,
 };
 
 struct DesktopState(Arc<Engine>);
@@ -42,6 +47,30 @@ struct Connection {
     base_url: String,
     model: String,
     remote_consent: bool,
+    api_key: Option<Zeroizing<String>>,
+}
+
+fn saved_connection(engine: &Engine) -> Result<Connection, String> {
+    let settings = engine.provider_settings()?;
+    let api_key = engine.provider_api_key()?;
+    Ok(Connection {
+        provider: settings.provider,
+        base_url: settings.base_url,
+        model: settings.model,
+        remote_consent: settings.remote_data_consent,
+        api_key,
+    })
+}
+
+fn job_connection(engine: &Engine, message_id: &str) -> Result<Connection, String> {
+    let settings = engine.notes_provider_settings(message_id)?;
+    Ok(Connection {
+        provider: settings.provider,
+        base_url: settings.base_url,
+        model: settings.model,
+        remote_consent: settings.remote_data_consent,
+        api_key: engine.provider_api_key()?,
+    })
 }
 
 async fn blocking<T: Send + 'static>(
@@ -219,6 +248,19 @@ async fn execute_notes(
             )
             .await
         }
+        ProviderKind::OpenAiCompatible => match connection.api_key.as_ref() {
+            Some(key) => {
+                remote::extract_notes(
+                    &connection.base_url,
+                    &connection.model,
+                    Zeroizing::new(key.to_string()),
+                    &prepared.input.user.content,
+                    prepared.cancel.clone(),
+                )
+                .await
+            }
+            None => Err(ProviderError::CredentialRequired),
+        },
     };
     let message = result.as_ref().err().map(|error| error.to_string());
     match engine.finish_notes(&prepared.attempt_id, result.as_ref().ok()) {
@@ -260,18 +302,176 @@ async fn retry_notes(
     remote_consent: bool,
     on_event: Channel<TurnEvent>,
 ) -> Result<(), String> {
-    update_notes(
-        Arc::clone(&state.0),
-        message_id,
-        &Connection {
+    let connection = job_connection(&state.0, &message_id)?;
+    // Legacy request fields are compatibility assertions only. Persisted job
+    // settings remain authoritative and cannot be overridden by the renderer.
+    let _ = (provider, base_url, model, remote_consent);
+    update_notes(Arc::clone(&state.0), message_id, &connection, &on_event).await
+}
+
+#[tauri::command]
+async fn get_provider_settings(state: State<'_, DesktopState>) -> Result<ProviderSettings, String> {
+    blocking(&state, Engine::provider_settings).await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn update_provider_settings(
+    state: State<'_, DesktopState>,
+    provider: ProviderKind,
+    base_url: String,
+    model: String,
+    remote_data_consent: bool,
+    expected_revision: i64,
+    api_key: Option<String>,
+    clear_api_key: bool,
+) -> Result<ProviderSettings, String> {
+    let api_key = api_key.map(Zeroizing::new);
+    blocking(&state, move |engine| {
+        engine.update_provider_settings(
             provider,
-            base_url,
-            model,
-            remote_consent,
-        },
-        &on_event,
-    )
+            &base_url,
+            &model,
+            remote_data_consent,
+            expected_revision,
+            api_key.as_ref().map(|value| value.as_str()),
+            clear_api_key,
+        )
+    })
     .await
+}
+
+#[tauri::command]
+async fn get_reading_settings(state: State<'_, DesktopState>) -> Result<ReadingSettings, String> {
+    blocking(&state, Engine::reading_settings).await
+}
+
+#[tauri::command]
+async fn update_reading_settings(
+    state: State<'_, DesktopState>,
+    text_scale_percent: u16,
+    line_width: LineWidth,
+    reduce_motion: bool,
+    enter_to_send: bool,
+    expected_revision: i64,
+) -> Result<ReadingSettings, String> {
+    blocking(&state, move |engine| {
+        engine.update_reading_settings(
+            text_scale_percent,
+            line_width,
+            reduce_motion,
+            enter_to_send,
+            expected_revision,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn list_note_jobs(state: State<'_, DesktopState>) -> Result<Vec<NoteJob>, String> {
+    blocking(&state, Engine::list_note_jobs).await
+}
+
+#[tauri::command]
+async fn resume_note_jobs(
+    state: State<'_, DesktopState>,
+    on_event: Channel<TurnEvent>,
+) -> Result<(), String> {
+    let jobs = state.0.list_note_jobs()?;
+    for job in jobs.into_iter().rev().filter(|job| {
+        matches!(job.status.as_str(), "pending" | "failed")
+            && job.attempt_count < 3
+            && job.next_attempt_at.as_ref().is_none_or(|timestamp| {
+                chrono::DateTime::parse_from_rfc3339(timestamp)
+                    .map(|time| time <= chrono::Utc::now())
+                    .unwrap_or(true)
+            })
+    }) {
+        let connection = job_connection(&state.0, &job.message_id)?;
+        if let Err(error) =
+            update_notes(Arc::clone(&state.0), job.message_id, &connection, &on_event).await
+        {
+            // Foreground work wins. The claimed job is either still durable
+            // or has already been returned to pending by prepare_turn.
+            if error.contains("current operation") {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_provider_health(state: State<'_, DesktopState>) -> Result<ProviderHealth, String> {
+    let connection = saved_connection(&state.0)?;
+    let provider = connection.provider;
+    let destination = if provider == ProviderKind::Ollama {
+        ProviderDestination::Local
+    } else {
+        ProviderDestination::Remote
+    };
+    let capabilities = ProviderCapabilities {
+        streaming: true,
+        structured_notes: true,
+    };
+    let result = match provider {
+        ProviderKind::Ollama => provider::list_models(&connection.base_url)
+            .await
+            .map(|models| {
+                if connection.model.is_empty()
+                    || !models.iter().any(|model| model.name == connection.model)
+                {
+                    Err(ProviderError::InvalidModel)
+                } else {
+                    Ok(())
+                }
+            })
+            .and_then(|value| value),
+        ProviderKind::Codex => codex::health(&connection.model).await,
+        ProviderKind::OpenAiCompatible => match connection.api_key.as_ref() {
+            Some(key) => {
+                remote::health(
+                    &connection.base_url,
+                    key,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+            }
+            None => Err(ProviderError::CredentialRequired),
+        },
+    };
+    state.0.require_unlocked()?;
+    let (status, message) = match result {
+        Ok(()) => (ProviderHealthStatus::Ready, None),
+        Err(
+            ProviderError::CredentialRequired
+            | ProviderError::CredentialRejected
+            | ProviderError::CodexSignInRequired,
+        ) => (
+            ProviderHealthStatus::AuthRequired,
+            Some("Authentication is required for this provider.".into()),
+        ),
+        Err(
+            ProviderError::InvalidBaseUrl
+            | ProviderError::UnsupportedScheme
+            | ProviderError::BaseUrlPath
+            | ProviderError::BaseUrlQuery
+            | ProviderError::BaseUrlUserInfo
+            | ProviderError::InvalidModel,
+        ) => (
+            ProviderHealthStatus::Misconfigured,
+            Some("Check the provider URL and selected model.".into()),
+        ),
+        Err(error) => (ProviderHealthStatus::Unavailable, Some(error.to_string())),
+    };
+    Ok(ProviderHealth {
+        provider,
+        status,
+        destination,
+        model: connection.model,
+        capabilities,
+        message,
+    })
 }
 
 #[tauri::command]
@@ -378,12 +578,14 @@ async fn send_message(
     if model.trim().is_empty() || model.len() > 256 {
         return Err("Select an available model before sending.".into());
     }
-    let connection = Connection {
-        provider,
-        base_url,
-        model,
-        remote_consent,
-    };
+    let connection = saved_connection(&state.0)?;
+    if provider != connection.provider
+        || base_url != connection.base_url
+        || model != connection.model
+        || remote_consent != connection.remote_consent
+    {
+        return Err("Provider settings changed. Refresh settings before sending.".into());
+    }
     let engine = Arc::clone(&state.0);
     let prepared = blocking(&state, move |engine| {
         engine.prepare_turn_with_provider(&session_id, &content, provider, remote_consent)
@@ -472,6 +674,20 @@ async fn send_message(
             )
             .await
         }
+        ProviderKind::OpenAiCompatible => match connection.api_key.as_ref() {
+            Some(key) => {
+                remote::generate(
+                    &connection.base_url,
+                    &connection.model,
+                    Zeroizing::new(key.to_string()),
+                    history,
+                    prepared.cancel.clone(),
+                    on_chunk,
+                )
+                .await
+            }
+            None => Err(ProviderError::CredentialRequired),
+        },
     };
     if result.is_ok() {
         result = flush(&mut pending);
@@ -565,6 +781,13 @@ pub fn run() {
             create_plan,
             remove_plan,
             enable_plan,
+            get_provider_settings,
+            update_provider_settings,
+            get_reading_settings,
+            update_reading_settings,
+            check_provider_health,
+            list_note_jobs,
+            resume_note_jobs,
             open_demo,
             list_notes,
             edit_note,

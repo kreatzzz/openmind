@@ -92,6 +92,8 @@ pub type ChunkCallback = Box<dyn FnMut(Chunk) -> Result<(), ProviderError> + Sen
 pub enum ProviderError {
     #[error("Codex CLI could not be started. Install Codex and run codex login first.")]
     CodexUnavailable,
+    #[error("The installed Codex version does not support the required App Server interface. Update Codex and try again.")]
+    CodexUnsupported,
     #[error("Sign in with your ChatGPT subscription using codex login, then check again.")]
     CodexSignInRequired,
     #[error("Codex could not complete this request. Check your subscription limits and connection, then retry.")]
@@ -152,6 +154,10 @@ pub enum ProviderError {
     EmptyResponse,
     #[error("provider callback failed")]
     CallbackFailed,
+    #[error("Add an API key for this provider before connecting.")]
+    CredentialRequired,
+    #[error("The provider rejected the API key. Check or replace it, then retry.")]
+    CredentialRejected,
 }
 
 #[derive(Debug, Clone)]
