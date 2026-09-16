@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -193,6 +194,20 @@ pub(crate) fn fuse_rankings(lexical: &[String], semantic: &[String]) -> Vec<Rank
         right
             .fused_score
             .total_cmp(&left.fused_score)
+            // Symmetric rank disagreement can produce an exact RRF tie. An
+            // arbitrary UUID then makes the selected identity unstable. When
+            // a caller supplied a valid semantic query, use that channel as
+            // the deterministic tie-breaker before lexical rank.
+            .then_with(|| {
+                left.semantic_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.semantic_rank.unwrap_or(usize::MAX))
+            })
+            .then_with(|| {
+                left.lexical_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.lexical_rank.unwrap_or(usize::MAX))
+            })
             .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
     output
@@ -203,10 +218,18 @@ pub(crate) fn fts_query(input: &str) -> Option<String> {
     for term in input
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .filter(|term| !term.is_empty())
-        .take(24)
     {
+        if is_query_stop_word(term) {
+            continue;
+        }
+        if terms.len() >= 24 {
+            break;
+        }
         let escaped = term.replace('"', "\"\"");
-        if !terms.iter().any(|existing| existing == &escaped) {
+        if !terms
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&escaped))
+        {
             terms.push(escaped);
         }
     }
@@ -217,6 +240,50 @@ pub(crate) fn fts_query(input: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join(" OR ")
     })
+}
+
+fn is_query_stop_word(term: &str) -> bool {
+    matches!(
+        term.to_ascii_lowercase().as_str(),
+        "a" | "an"
+            | "the"
+            | "am"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "be"
+            | "been"
+            | "being"
+            | "do"
+            | "does"
+            | "did"
+            | "what"
+            | "when"
+            | "where"
+            | "who"
+            | "why"
+            | "how"
+            | "about"
+            | "tell"
+            | "me"
+            | "my"
+            | "i"
+            | "we"
+            | "our"
+            | "of"
+            | "to"
+            | "in"
+            | "on"
+            | "at"
+            | "for"
+            | "from"
+            | "with"
+            | "and"
+            | "or"
+            | "this"
+            | "that"
+    )
 }
 
 pub(crate) fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
@@ -382,18 +449,34 @@ pub(crate) async fn embed_local_ollama_after_verification(
     if !response.status().is_success() {
         return Err(EmbeddingError::HttpStatus(response.status().as_u16()));
     }
-    let bytes = response.bytes().await.map_err(|error| {
-        if error.is_timeout() {
-            EmbeddingError::Timeout
-        } else {
-            EmbeddingError::Network
-        }
-    })?;
-    if bytes.len() > MAX_EMBED_RESPONSE_BYTES {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_EMBED_RESPONSE_BYTES as u64)
+    {
         return Err(EmbeddingError::ResponseTooLarge);
     }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel.cancelled() => return Err(EmbeddingError::Cancelled),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = chunk else { break };
+        let chunk = chunk.map_err(|error| {
+            if error.is_timeout() {
+                EmbeddingError::Timeout
+            } else {
+                EmbeddingError::Network
+            }
+        })?;
+        if chunk.len() > MAX_EMBED_RESPONSE_BYTES.saturating_sub(body.len()) {
+            return Err(EmbeddingError::ResponseTooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
     let mut response: EmbedResponse =
-        serde_json::from_slice(&bytes).map_err(|_| EmbeddingError::MalformedResponse)?;
+        serde_json::from_slice(&body).map_err(|_| EmbeddingError::MalformedResponse)?;
     if response.model != model || response.embeddings.len() != 1 {
         return Err(EmbeddingError::MalformedResponse);
     }
@@ -462,9 +545,11 @@ mod tests {
     fn fts_query_treats_syntax_as_plain_terms_and_preserves_negation() {
         assert_eq!(
             fts_query("Mira is NOT my sister (coworker)"),
-            Some("\"Mira\" OR \"is\" OR \"NOT\" OR \"my\" OR \"sister\" OR \"coworker\"".into())
+            Some("\"Mira\" OR \"NOT\" OR \"sister\" OR \"coworker\"".into())
         );
         assert_eq!(fts_query("!*"), None);
+        assert_eq!(fts_query("What is this about?"), None);
+        assert_eq!(fts_query("Mira mira MIRA"), Some("\"Mira\"".into()));
     }
 
     #[test]
@@ -476,6 +561,12 @@ mod tests {
         assert_eq!(ranked[0].memory_id, "both");
         assert_eq!(ranked[0].lexical_rank, Some(2));
         assert_eq!(ranked[0].semantic_rank, Some(1));
+
+        let tied = fuse_rankings(
+            &["lexical-first".into(), "semantic-first".into()],
+            &["semantic-first".into(), "lexical-first".into()],
+        );
+        assert_eq!(tied[0].memory_id, "semantic-first");
     }
 
     #[test]
@@ -551,5 +642,73 @@ mod tests {
         assert_eq!(result.model, "synthetic-embed");
         assert_eq!(result.vector, vec![0.25, -0.5, 1.0]);
         handle.await.expect("fixture task");
+    }
+
+    #[tokio::test]
+    async fn embedding_body_read_honors_cancellation_after_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 2 * 1024];
+            stream.read(&mut request).await.expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 128\r\n\r\n",
+                )
+                .await
+                .expect("write headers");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            trigger.cancel();
+        });
+
+        let result = embed_local_ollama_after_verification(
+            &format!("http://{address}"),
+            "synthetic-embed",
+            "query text",
+            &cancel,
+        )
+        .await;
+        assert_eq!(result, Err(EmbeddingError::Cancelled));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn embedding_body_rejects_declared_oversize_before_reading_it() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 2 * 1024];
+            stream.read(&mut request).await.expect("read request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                MAX_EMBED_RESPONSE_BYTES + 1
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write headers");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let result = embed_local_ollama_after_verification(
+            &format!("http://{address}"),
+            "synthetic-embed",
+            "query text",
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(result, Err(EmbeddingError::ResponseTooLarge));
+        handle.abort();
     }
 }
