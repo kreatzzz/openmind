@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: desktop-checks-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   desktop:
     strategy:

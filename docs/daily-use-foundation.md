@@ -20,6 +20,8 @@ Corrections invalidate old vectors. Forgetting removes eligible derived records 
 
 The fallback budget uses conservative UTF-8 byte limits and a hard ceiling, not a claim that bytes equal tokens. Current input keeps priority. Warm synthetic keyword benchmarks at 1,000, 10,000, and 100,000 records are recorded in `test-results/retrieval-benchmark-2026-09-16.md`; these do not measure semantic-model latency or clinical recall quality.
 
+The subsequent [memory-quality evaluation](evaluations/memory-quality-2026-09-16.md) compares keyword and live hybrid retrieval on 18 synthetic questions. Both retrieved the intended memory on 16 questions; the small embedding model added an irrelevant result for one of two unknown questions. The report also records extraction errors, correction/forgetting checks, and the limits of exact-quote validation. Passing schema validation is not evidence that a generated memory is accurate.
+
 ## Vault controls
 
 Encrypted backups contain a checkpointed SQLCipher database and an authenticated encrypted envelope. A separate backup passphrase becomes the unlock passphrase after restore. Restore validates a staged vault before replacing the current one and preserves recovery copies on failure. Passphrase changes rewrap the database key without rewriting conversation data.
@@ -46,5 +48,7 @@ The interface includes light, pure-black dark, and system appearance, five accen
 - Resolve product decisions on speech input, transcript editing, relationship mapping, licensing, and whether reminders should run after closing the window.
 
 ## Local verification
+
+The figures below describe the earlier daily-use increment. The follow-up evaluation and desktop release work are tracked in the [memory-quality report](evaluations/memory-quality-2026-09-16.md) and [release checklist](desktop-release.md). Native bundle workflows and a signing-gated draft release workflow are implemented; signing credentials and physical-device release checks remain outstanding.
 
 The integrated backend passed 103 regression tests on Windows; 26 UI tests and the production frontend build also passed. Both opt-in Ollama smoke tests passed against the already-installed `qwen3.5:4b`: one streamed a synthetic reply, and one produced a valid source-backed notes patch. No model was downloaded and no remote inference request was made. This checks protocol behavior, not clinical response quality. Browser checks covered pure-black surfaces in explicit and system dark mode, light appearance, accent selection, planned-session creation and overview refresh, and 320px/390px/1280px layouts without horizontal overflow. Required macOS and Windows checks are recorded on the pull request.
