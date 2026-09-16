@@ -79,7 +79,7 @@ components:
 
 # Openmind design direction
 
-Krish selected Vercel's Geist design system for this interface. Openmind uses a monochrome letter ìoî mark in the interface and native app icons; do not restore the leaf. The implementation uses bundled Geist and Geist Mono fonts, neutral semantic tokens, compact controls, and restrained elevation. Reference the official [colors](https://vercel.com/geist/colors), [typography](https://vercel.com/geist/typography), [buttons](https://vercel.com/geist/button), and [materials](https://vercel.com/geist/materials) when extending components. This is a local implementation of those principles, not an imported Vercel component library.
+Krish selected Vercel's Geist design system for this interface. Openmind uses a monochrome letter ‚Äúo‚Äù mark in the interface and native app icons; do not restore the leaf. The implementation uses bundled Geist and Geist Mono fonts, neutral semantic tokens, compact controls, and restrained elevation. Reference the official [colors](https://vercel.com/geist/colors), [typography](https://vercel.com/geist/typography), [buttons](https://vercel.com/geist/button), and [materials](https://vercel.com/geist/materials) when extending components. This is a local implementation of those principles, not an imported Vercel component library.
 
 ## Implemented desktop workspace
 

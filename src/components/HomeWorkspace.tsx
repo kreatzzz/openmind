@@ -165,7 +165,7 @@ export function HomeWorkspace({
                           hour: "numeric",
                           minute: "2-digit",
                         })}{" "}
-                        � {plan.timezone}
+                        · {plan.timezone}
                       </small>
                     </span>
                   </button>
@@ -181,7 +181,7 @@ export function HomeWorkspace({
                 </div>
                 <h3>
                   {plansError
-                    ? "Your plans couldn�t load."
+                    ? "Your plans couldn't load."
                     : "Choose a time to check in."}
                 </h3>
                 <p>
