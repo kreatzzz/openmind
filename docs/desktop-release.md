@@ -33,7 +33,7 @@ Configure a protected GitHub environment named `desktop-release`. Restrict its d
 | `WINDOWS_CERTIFICATE_THUMBPRINT` | Expected certificate thumbprint                             |
 | `WINDOWS_TIMESTAMP_URL`          | RFC 3161 timestamp service URL for the certificate provider |
 
-The preflight fails before source checkout if any credential is absent. The macOS job imports the certificate into an ephemeral keychain, signs with Developer ID, explicitly submits both the app archive and DMG to Apple's notary service, staples both distributed forms, and validates the tickets. The Windows job imports the PFX into the runner's current-user certificate store, refuses a thumbprint mismatch or expired certificate, signs the executable and NSIS installer with SHA-256 and timestamping, and verifies Authenticode before and after a silent install.
+The preflight fails before source checkout if any credential is absent. The macOS job imports the certificate into an ephemeral keychain, signs with Developer ID, notarizes and staples the app, then creates a DMG containing that stapled app. It signs, notarizes, and staples the DMG and verifies the embedded app again from a read-only mount. The Windows job imports the PFX into the runner's current-user certificate store, refuses a thumbprint mismatch or expired certificate, signs the executable and NSIS installer with SHA-256 and timestamping, and verifies Authenticode on the installer, installed app, and uninstaller.
 
 After both native jobs pass, the workflow creates a new **draft** GitHub release with the signed assets and a deterministic `SHA256SUMS.txt`. It refuses to overwrite an existing release. Publishing remains a separate owner action after clean-device review.
 

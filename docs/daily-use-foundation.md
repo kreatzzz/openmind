@@ -18,7 +18,7 @@ Five existing record kinds remain compatible with saved vaults. Seven overlappin
 
 Corrections invalidate old vectors. Forgetting removes eligible derived records and excludes their source turn from future model context. Rebuilds do not backfill memory-disabled messages. Async retrieval rechecks the unlocked vault, session permission, record/index epoch, and selected embedding configuration before releasing context. Private conversations never query this index.
 
-The fallback budget uses conservative UTF-8 byte limits and a hard ceiling, not a claim that bytes equal tokens. Current input keeps priority. Warm synthetic keyword benchmarks at 1,000, 10,000, and 100,000 records are recorded in `test-results/retrieval-benchmark-2026-09-16.md`; these do not measure semantic-model latency or clinical recall quality.
+The fallback budget uses conservative UTF-8 byte limits and a hard ceiling, not a claim that bytes equal tokens. Current input keeps priority. Warm synthetic keyword benchmarks at 1,000, 10,000, and 100,000 records are recorded in the [memory-quality report](evaluations/memory-quality-2026-09-16.md); these do not measure semantic-model latency or clinical recall quality.
 
 The subsequent [memory-quality evaluation](evaluations/memory-quality-2026-09-16.md) compares keyword and live hybrid retrieval on 18 synthetic questions. Both retrieved the intended memory on 16 questions; the small embedding model added an irrelevant result for one of two unknown questions. The report also records extraction errors, correction/forgetting checks, and the limits of exact-quote validation. Passing schema validation is not evidence that a generated memory is accurate.
 
