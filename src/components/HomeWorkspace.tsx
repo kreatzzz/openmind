@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   BookOpen,
@@ -6,7 +7,14 @@ import {
   MessageSquare,
   Plus,
 } from "lucide-react";
-import type { MemoryRecord, Session, UserNote } from "../lib/desktop";
+import {
+  desktop,
+  type MemoryRecord,
+  type Session,
+  type SessionPlan,
+  type UserNote,
+} from "../lib/desktop";
+import { readSamplePlans } from "../lib/plans";
 
 export function HomeWorkspace({
   sessions,
@@ -19,6 +27,7 @@ export function HomeWorkspace({
   onPlans,
   disabled,
   sample,
+  plansRevision = 0,
 }: {
   sessions: Session[];
   notes: UserNote[];
@@ -30,7 +39,32 @@ export function HomeWorkspace({
   onPlans: () => void;
   disabled: boolean;
   sample: boolean;
+  plansRevision?: number;
 }) {
+  const [plans, setPlans] = useState<SessionPlan[]>([]);
+  const [plansError, setPlansError] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setPlansError(false);
+    const loading = sample
+      ? Promise.resolve(readSamplePlans())
+      : desktop.listPlans();
+    void loading
+      .then((value) => {
+        if (!cancelled)
+          setPlans(
+            value
+              .filter((plan) => plan.enabled)
+              .sort((a, b) => a.nextAt.localeCompare(b.nextAt)),
+          );
+      })
+      .catch(() => {
+        if (!cancelled) setPlansError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sample, plansRevision]);
   const hour = new Date().getHours();
   const greeting =
     hour < 12
@@ -112,19 +146,54 @@ export function HomeWorkspace({
               <h2>Planned sessions</h2>
               <CalendarDays size={17} />
             </div>
-            <div className="plan-illustration" aria-hidden="true">
-              <span>SET YOUR OWN PACE</span>
-              <div>
-                <i /> <i /> <i className="today" /> <i /> <i /> <i /> <i />
+            {plans.length ? (
+              <div className="upcoming-plans">
+                {plans.slice(0, 3).map((plan) => (
+                  <button
+                    className="recent-row"
+                    key={plan.id}
+                    onClick={onPlans}
+                  >
+                    <CalendarDays size={18} />
+                    <span>
+                      <strong>{plan.label}</strong>
+                      <small>
+                        {new Date(plan.nextAt).toLocaleString(undefined, {
+                          timeZone: plan.timezone,
+                          month: "short",
+                          day: "numeric",
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })}{" "}
+                        � {plan.timezone}
+                      </small>
+                    </span>
+                  </button>
+                ))}
               </div>
-            </div>
-            <h3>Choose a time to check in.</h3>
-            <p>
-              Add a reminder for your next conversation, once or on a regular
-              schedule.
-            </p>
+            ) : (
+              <>
+                <div className="plan-illustration" aria-hidden="true">
+                  <span>SET YOUR OWN PACE</span>
+                  <div>
+                    <i /> <i /> <i className="today" /> <i /> <i /> <i /> <i />
+                  </div>
+                </div>
+                <h3>
+                  {plansError
+                    ? "Your plans couldn�t load."
+                    : "Choose a time to check in."}
+                </h3>
+                <p>
+                  {plansError
+                    ? "Open planned sessions to try again."
+                    : "Add a reminder for your next conversation, once or on a regular schedule."}
+                </p>
+              </>
+            )}
             <button className="secondary-button wide" onClick={onPlans}>
-              Plan a session <ArrowRight size={15} />
+              {plans.length || plansError ? "Manage plans" : "Plan a session"}{" "}
+              <ArrowRight size={15} />
             </button>
           </section>
           <section className="home-section notes-section">

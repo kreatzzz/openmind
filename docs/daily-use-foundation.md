@@ -44,3 +44,7 @@ The interface includes light, pure-black dark, and system appearance, five accen
 - Build signed installers, test installation and updates, and choose supported hardware and model requirements.
 - Define clinical intended use, population, jurisdiction, oversight, crisis-response behavior, and evaluation criteria before clinical deployment.
 - Resolve product decisions on speech input, transcript editing, relationship mapping, licensing, and whether reminders should run after closing the window.
+
+## Local verification
+
+The integrated backend passed 94 regression tests on Windows before the final UI integration. Both opt-in Ollama smoke tests passed against the already-installed `qwen3.5:4b`: one streamed a synthetic reply, and one produced a valid source-backed notes patch. No model was downloaded and no remote inference request was made. This checks protocol behavior, not clinical response quality. Final UI, formatting, and platform checks are recorded on the pull request.

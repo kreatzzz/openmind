@@ -5,14 +5,28 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { CalendarDays, Plus, Trash2 } from "lucide-react";
 import { desktop, type PlanInput, type SessionPlan } from "../lib/desktop";
+import { readSamplePlans, writeSamplePlans } from "../lib/plans";
 
 function defaultDate() {
   const date = new Date(Date.now() + 60 * 60 * 1000);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-export function PlannedSessions({ sample }: { sample: boolean }) {
-  const [plans, setPlans] = useState<SessionPlan[]>([]);
+export function PlannedSessions({
+  sample,
+  onChanged,
+}: {
+  sample: boolean;
+  onChanged?: () => void;
+}) {
+  const [plans, setPlans] = useState<SessionPlan[]>(() =>
+    sample ? readSamplePlans() : [],
+  );
+  function publish(next: SessionPlan[]) {
+    setPlans(next);
+    if (sample) writeSamplePlans(next);
+    onChanged?.();
+  }
   const [input, setInput] = useState<PlanInput>({
     label: "Time to reflect",
     localStart: defaultDate(),
@@ -64,7 +78,7 @@ export function PlannedSessions({ sample }: { sample: boolean }) {
             nextAt: new Date(input.localStart).toISOString(),
           }
         : await desktop.createPlan(input);
-      setPlans((items) => [...items, plan]);
+      publish([...plans, plan]);
       setAdding(false);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -79,14 +93,12 @@ export function PlannedSessions({ sample }: { sample: boolean }) {
     try {
       if (remove) {
         if (!sample) await desktop.removePlan(plan.id, plan.revision);
-        setPlans((items) => items.filter((item) => item.id !== plan.id));
+        publish(plans.filter((item) => item.id !== plan.id));
       } else {
         const updated = sample
           ? { ...plan, enabled: !plan.enabled, revision: plan.revision + 1 }
           : await desktop.enablePlan(plan.id, !plan.enabled, plan.revision);
-        setPlans((items) =>
-          items.map((item) => (item.id === plan.id ? updated : item)),
-        );
+        publish(plans.map((item) => (item.id === plan.id ? updated : item)));
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -114,7 +126,10 @@ export function PlannedSessions({ sample }: { sample: boolean }) {
             <div>
               <strong>{plan.label}</strong>
               <small>
-                {new Date(plan.nextAt).toLocaleString()} · {plan.timezone}
+                {new Date(plan.nextAt).toLocaleString(undefined, {
+                  timeZone: plan.timezone,
+                })}{" "}
+                · {plan.timezone}
               </small>
               <small>
                 {plan.recurrence} · {plan.enabled ? "Scheduled" : "Paused"}
@@ -170,6 +185,7 @@ export function PlannedSessions({ sample }: { sample: boolean }) {
           <label htmlFor="plan-timezone">Timezone</label>
           <input
             id="plan-timezone"
+            disabled={sample}
             value={input.timezone}
             required
             spellCheck={false}
