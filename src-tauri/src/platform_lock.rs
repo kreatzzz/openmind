@@ -277,7 +277,7 @@ mod macos_impl {
     use std::{cell::RefCell, ptr::NonNull};
 
     use block2::RcBlock;
-    use objc2::{runtime::ProtocolObject, AnyThread, MainThreadMarker};
+    use objc2::{runtime::ProtocolObject, MainThreadMarker};
     use objc2_app_kit::{
         NSWorkspace, NSWorkspaceScreensDidSleepNotification,
         NSWorkspaceSessionDidResignActiveNotification, NSWorkspaceWillSleepNotification,
@@ -367,7 +367,7 @@ mod macos_impl {
     impl Drop for Monitor {
         fn drop(&mut self) {
             for observer in &self.observers {
-                unsafe { self.center.removeObserver(observer) };
+                unsafe { self.center.removeObserver(observer.as_ref().as_ref()) };
             }
         }
     }

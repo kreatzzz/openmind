@@ -1,8 +1,11 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
+
+#[cfg(windows)]
+use std::sync::Mutex;
 
 use tauri::{ipc::Channel, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
