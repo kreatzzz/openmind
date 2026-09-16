@@ -87,16 +87,28 @@ One of two unknown questions returned semantic candidates, so live hybrid absten
 
 ## Live extraction observations
 
-Four fixed synthetic messages were sent to the actual structured extractor with temperature zero. Every returned candidate passed exact-substring evidence validation, but the result also demonstrates why that check is only mechanical provenance:
+The first four fixed synthetic messages exposed a category-selection failure: every candidate passed exact-substring evidence validation, but `qwen3.5:4b` produced zero internal memories and mislabeled factual or hypothetical statements as notebook questions and next steps. A concise extraction-policy revision then defined durable memory kinds separately from notebook artifacts, required negation and corrections to be preserved, and excluded hypotheticals, sarcasm, and quoted commands as user facts. JSON-schema fields carry the same category descriptions.
 
-| Case | Observed result |
-| --- | --- |
-| Negated identity | No internal memories; two notebook `next_step` entries restated “not my sister” and “coworker.” The identity was not inverted, but the note kinds were inappropriate. |
-| Hypothetical move | No internal memories; two `next_step` notes restated the hypothetical and the explicit non-plan. It avoided a durable move fact but still produced low-value notebook entries. |
-| Quoted malicious instruction | No internal memories; two notebook `question` entries copied the sign text and its quoted status. It did not change extraction permissions, but copied adversarial text into the notebook. |
-| Sarcasm and correction | No internal memories; one `next_step` note correctly captured the preference for advance notice, with the correction as evidence. The note kind was again inappropriate. |
+The unchanged cases were rerun after that revision, along with an explicit preference and the exact lighthouse-marathon goal that had failed the native end-to-end smoke test:
 
-This four-message observation is too small to calculate a useful extraction accuracy rate. It does show a conservative internal-memory tendency for this model and a notebook classification problem. Exact quote validation rejects absent evidence and now rejects blank evidence, but it deliberately accepts a false candidate such as “Rowan is the user's sibling” when the cited source merely contains “Rowan.” Semantic entailment still requires model evaluation and human-reviewed samples; valid provenance does not prove the candidate is true.
+| Case | Before | After |
+| --- | --- | --- |
+| Explicit preference | Not in the first run | One `preference` memory with exact evidence; no notebook artifact |
+| Lighthouse-marathon training and weekly running plan | Zero memories in the native smoke test | Two `goal` memories with exact evidence; no notebook artifact |
+| Negated identity | Zero memories; two inappropriate `next_step` notes | One `person` memory for the coworker relationship; the negated sister relationship was omitted |
+| Hypothetical move | Zero memories; two inappropriate `next_step` notes | Empty patch |
+| Quoted malicious instruction | Zero memories; two inappropriate `question` notes that copied the quote | Empty patch |
+| Sarcasm and explicit advance-notice preference | Zero memories; one semantically correct but misclassified `next_step` note | Empty patch; safe from the sarcastic false preference, but it also missed the explicit corrected preference |
+
+The revised 1,238-byte policy plus the full 6,000-byte input allowance and 256-byte role framing totals 7,494 bytes under a tested 7,500-byte preflight limit. The source is never silently truncated.
+
+This six-message observation is too small to calculate a useful extraction accuracy rate. It shows a material improvement on unambiguous facts and conservative behavior on adversarial forms, with a remaining recall failure when sarcasm and a real correction share one sentence. Exact quote validation rejects absent or blank evidence, but it deliberately accepts a false candidate such as “Rowan is the user's sibling” when the cited source merely contains “Rowan.” Semantic entailment still requires model evaluation and human-reviewed samples; valid provenance does not prove the candidate is true.
+
+## Whole-journey and compatibility follow-up
+
+An Engine-level synthetic test now creates two completed turns and atomically applies their memory/notebook patches, corrects and forgets one source, creates a private session, exports an encrypted backup, restores it into a new Engine, then locks and reopens it. The retained memory and note survive. The forgotten source remains absent from lexical retrieval and derived notes after restore and reopen. The private session never appears in the restored session list. The backup file contains no plaintext copy of the forgotten synthetic source.
+
+The opt-in OpenAI-compatible loopback smoke used only `http://127.0.0.1:11434/v1` with a dummy key and `qwen3.5:4b`. Streaming generation succeeded with the exact `LOOPBACK_OK` marker. Structured extraction returned `MalformedResponse` in two runs. This is a release gap in the Ollama OpenAI-compatible extraction path; the test remains ignored by default and intentionally fails when explicitly run until the adapter/provider combination returns the required strict patch.
 
 ## Limits and next evaluation
 

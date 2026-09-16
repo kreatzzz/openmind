@@ -469,6 +469,14 @@ async fn live_local_extraction_observations() {
     let base_url = std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
     let cases = [
         (
+            "explicit_preference",
+            "I prefer a short written recap after difficult meetings.",
+        ),
+        (
+            "explicit_goal",
+            "I am training for a synthetic lighthouse marathon in October, and I plan to run three times each week.",
+        ),
+        (
             "negated_identity",
             "Mira is not my sister. Mira is my coworker on the Atlas launch.",
         ),
