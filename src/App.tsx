@@ -109,6 +109,15 @@ const dateLabel = (value: string) =>
     month: "long",
     day: "numeric",
   });
+const scheduleAnimationFrame = (callback: FrameRequestCallback) =>
+  typeof window.requestAnimationFrame === "function"
+    ? window.requestAnimationFrame(callback)
+    : window.setTimeout(() => callback(performance.now()), 16);
+const cancelScheduledAnimationFrame = (handle: number) => {
+  if (typeof window.cancelAnimationFrame === "function")
+    window.cancelAnimationFrame(handle);
+  else window.clearTimeout(handle);
+};
 function setThemeAttribute(name: "theme" | "color", value: string) {
   const style = document.createElement("style");
   style.textContent = "*,*::before,*::after{transition:none!important}";
@@ -159,6 +168,7 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState("");
   const [announcement, setAnnouncement] = useState("");
   const [passphrase, setPassphrase] = useState("");
@@ -217,11 +227,59 @@ export default function App() {
   const atBottom = useRef(true);
   const scroll = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const pendingChunks = useRef(new Map<string, string>());
+  const chunkFlushFrame = useRef<number | null>(null);
   const draftsBySession = useRef(new Map<string, string>());
   const lastActivity = useRef(0);
   const fontSize = Math.round((17 * reading.textScalePercent) / 100);
   const enterToSend = reading.enterToSend;
   const session = sessions.find((item) => item.id === selected);
+
+  function discardPendingChunks() {
+    if (chunkFlushFrame.current !== null) {
+      cancelScheduledAnimationFrame(chunkFlushFrame.current);
+      chunkFlushFrame.current = null;
+    }
+    pendingChunks.current.clear();
+  }
+
+  function flushPendingChunks(request: number, turn: number) {
+    if (chunkFlushFrame.current !== null) {
+      cancelScheduledAnimationFrame(chunkFlushFrame.current);
+      chunkFlushFrame.current = null;
+    }
+    const chunks = pendingChunks.current;
+    pendingChunks.current = new Map();
+    if (
+      !chunks.size ||
+      generation.current !== request ||
+      turnGeneration.current !== turn
+    )
+      return;
+    setMessages((current) =>
+      current.map((item) => {
+        const content = chunks.get(item.id);
+        return content ? { ...item, content: item.content + content } : item;
+      }),
+    );
+  }
+
+  function queueChunk(
+    messageId: string,
+    content: string,
+    request: number,
+    turn: number,
+  ) {
+    pendingChunks.current.set(
+      messageId,
+      (pendingChunks.current.get(messageId) ?? "") + content,
+    );
+    if (chunkFlushFrame.current === null) {
+      chunkFlushFrame.current = scheduleAnimationFrame(() =>
+        flushPendingChunks(request, turn),
+      );
+    }
+  }
 
   function setDraftValue(value: string, sessionId: string | null = selected) {
     setDraft(value);
@@ -373,6 +431,7 @@ export default function App() {
       generation.current++;
     };
   }, []);
+  useEffect(() => discardPendingChunks, []);
   useEffect(() => {
     if (!isDesktop) return;
     let disposed = false;
@@ -599,6 +658,7 @@ export default function App() {
   function exitSample() {
     resetSamplePlans();
     generation.current++;
+    discardPendingChunks();
     setProvider("ollama");
     setBaseUrl("http://127.0.0.1:11434");
     setModel("");
@@ -635,6 +695,7 @@ export default function App() {
       return;
     }
     const request = ++generation.current;
+    discardPendingChunks();
     setBusy(true);
     setError("");
     try {
@@ -658,6 +719,7 @@ export default function App() {
     if (sending || busy) return;
     rememberCurrentDraft();
     const request = ++generation.current;
+    discardPendingChunks();
     setBusy(true);
     setError("");
     try {
@@ -743,6 +805,7 @@ export default function App() {
     resetSamplePlans();
     generation.current++;
     turnGeneration.current++;
+    discardPendingChunks();
     activeTurn.current = false;
     stopRequested.current = false;
     setMessages([]);
@@ -776,6 +839,7 @@ export default function App() {
     setDeleteConversation(false);
     setDrawer(false);
     setSending(false);
+    setStopping(false);
     setNewReply(false);
     setBusy(false);
     setScreen("locked");
@@ -785,6 +849,7 @@ export default function App() {
     if (sending || busy || sample) return;
     rememberCurrentDraft();
     const request = ++generation.current;
+    discardPendingChunks();
     setBusy(true);
     setError("");
     try {
@@ -961,7 +1026,9 @@ export default function App() {
     const turnNotesEnabled = sessionNotesEnabled;
     activeTurn.current = true;
     stopRequested.current = false;
+    discardPendingChunks();
     setSending(true);
+    setStopping(false);
     setError("");
     setAnnouncement("Preparing a reply");
     setNoteStatus("");
@@ -1016,14 +1083,9 @@ export default function App() {
             ]);
           }
           if (event.type === "chunk")
-            setMessages((current) =>
-              current.map((item) =>
-                item.id === event.messageId
-                  ? { ...item, content: item.content + event.content }
-                  : item,
-              ),
-            );
+            queueChunk(event.messageId, event.content, request, turn);
           if (event.type === "finished") {
+            flushPendingChunks(request, turn);
             setMessages((current) =>
               current.map((item) =>
                 item.id === event.messageId
@@ -1038,6 +1100,7 @@ export default function App() {
             );
             activeTurn.current = false;
             setSending(false);
+            setStopping(false);
           }
           if (event.type === "notes") {
             if (event.status === "updating" && stopRequested.current) {
@@ -1055,6 +1118,7 @@ export default function App() {
             if (status) setAnnouncement(status);
           }
           if (event.type === "error") {
+            flushPendingChunks(request, turn);
             setError(event.message);
             setAnnouncement("The reply could not be completed.");
           }
@@ -1091,8 +1155,10 @@ export default function App() {
         }
       }
       if (generation.current === request && turnGeneration.current === turn) {
+        flushPendingChunks(request, turn);
         activeTurn.current = false;
         setSending(false);
+        setStopping(false);
         setMessages((current) =>
           current.map((item) =>
             item.status === "streaming"
@@ -1174,12 +1240,19 @@ export default function App() {
     }
   }
   async function stop() {
+    if (stopRequested.current) return;
     stopRequested.current = true;
+    setStopping(true);
     const request = generation.current;
+    const turn = turnGeneration.current;
     try {
       await desktop.cancelTurn();
     } catch (reason) {
-      if (request === generation.current) setError(errorText(reason));
+      if (request === generation.current && turn === turnGeneration.current) {
+        stopRequested.current = false;
+        setStopping(false);
+        setError(errorText(reason));
+      }
     }
   }
 
@@ -1659,7 +1732,9 @@ export default function App() {
                         <div className="composer-toolbar">
                           <span>
                             {sending
-                              ? noteStatus || "Generating a reply"
+                              ? stopping
+                                ? "Stopping reply"
+                                : noteStatus || "Generating a reply"
                               : enterToSend
                                 ? "Shift + Enter for a new line"
                                 : "Ctrl / ⌘ + Enter to send"}
@@ -1668,8 +1743,11 @@ export default function App() {
                             <button
                               className="send-button"
                               type="button"
-                              aria-label="Stop reply"
+                              aria-label={
+                                stopping ? "Stopping reply" : "Stop reply"
+                              }
                               onClick={stop}
+                              disabled={stopping}
                             >
                               <Square size={16} fill="currentColor" />
                             </button>
@@ -2013,12 +2091,14 @@ export default function App() {
               )}
             </div>
           </div>
-          <button
-            className="primary-button wide"
-            onClick={() => setSettings(false)}
-          >
-            Done
-          </button>
+          <div className="settings-footer">
+            <button
+              className="primary-button"
+              onClick={() => setSettings(false)}
+            >
+              Done
+            </button>
+          </div>
         </Dialog>
       )}
       {restoreOpen && (

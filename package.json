@@ -11,6 +11,7 @@
     "release:verify": "bun scripts/release/verify-version.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:browser": "bun scripts/check-ui.mjs",
     "test:core": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features",
     "tauri": "tauri"
   },

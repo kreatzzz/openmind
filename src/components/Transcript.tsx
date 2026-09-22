@@ -1,7 +1,47 @@
-import { useEffect, type RefObject } from "react";
+import { memo, useEffect, type RefObject } from "react";
 import { Square } from "lucide-react";
 import type { Message, Session } from "../lib/desktop";
 import { Mark } from "./Mark";
+
+const TranscriptMessage = memo(function TranscriptMessage({
+  message,
+  highlighted,
+}: {
+  message: Message;
+  highlighted: boolean;
+}) {
+  return (
+    <article
+      id={`message-${message.id}`}
+      data-highlight={highlighted || undefined}
+      className={`message message-${message.role}`}
+      aria-label={message.role === "user" ? "You" : "Openmind AI"}
+    >
+      <div className="speaker">
+        {message.role === "assistant" ? (
+          <>
+            <Mark small />
+            Openmind<span className="ai-label">AI</span>
+          </>
+        ) : (
+          <>
+            <span className="user-mark" />
+            You
+          </>
+        )}
+      </div>
+      <div className="message-content">
+        {message.content ||
+          (message.status === "streaming" ? "Preparing a reply" : "")}
+      </div>
+      {message.status === "interrupted" && (
+        <p className="interrupted">
+          <Square size={11} /> Reply stopped before completion
+        </p>
+      )}
+    </article>
+  );
+});
 
 export function Transcript({
   highlight,
@@ -54,38 +94,11 @@ export function Transcript({
               style={{ fontSize }}
             >
               {messages.map((message) => (
-                <article
+                <TranscriptMessage
                   key={message.id}
-                  id={`message-${message.id}`}
-                  data-highlight={highlight === message.id || undefined}
-                  className={`message message-${message.role}`}
-                  aria-label={message.role === "user" ? "You" : "Openmind AI"}
-                >
-                  <div className="speaker">
-                    {message.role === "assistant" ? (
-                      <>
-                        <Mark small />
-                        Openmind<span className="ai-label">AI</span>
-                      </>
-                    ) : (
-                      <>
-                        <span className="user-mark" />
-                        You
-                      </>
-                    )}
-                  </div>
-                  <div className="message-content">
-                    {message.content ||
-                      (message.status === "streaming"
-                        ? "Preparing a reply"
-                        : "")}
-                  </div>
-                  {message.status === "interrupted" && (
-                    <p className="interrupted">
-                      <Square size={11} /> Reply stopped before completion
-                    </p>
-                  )}
-                </article>
+                  message={message}
+                  highlighted={highlight === message.id}
+                />
               ))}
             </div>
           </>

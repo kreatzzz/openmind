@@ -133,7 +133,10 @@ export function ProviderSettingsPanel({
       onSaved(saved, health.status === "ready");
       if (health.status !== "ready")
         throw new Error(health.message || "The connection needs attention.");
-      setStatus("Connection saved. Ready for a conversation.");
+      setStatus(
+        health.message ||
+          "The connection and selected model are reachable. Chat and memory quality have not been verified.",
+      );
     } catch (reason) {
       if (operation === request.current)
         setError(reason instanceof Error ? reason.message : String(reason));

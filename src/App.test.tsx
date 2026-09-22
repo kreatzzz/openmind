@@ -234,8 +234,16 @@ describe("native conversation lifecycle", () => {
       }),
     );
     expect(screen.getByText("Visible before locking.")).toBeInTheDocument();
+    act(() =>
+      emit?.({
+        type: "chunk",
+        messageId: "old-reply",
+        content: " Pending private text.",
+      }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Lock vault" }));
     await screen.findByRole("button", { name: "Unlock your vault" });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
     expect(desktop.cancelTurn).toHaveBeenCalledOnce();
     act(() =>
       emit?.({
@@ -245,7 +253,9 @@ describe("native conversation lifecycle", () => {
       }),
     );
     expect(
-      screen.queryByText(/Visible before locking|Late private text/),
+      screen.queryByText(
+        /Visible before locking|Pending private text|Late private text/,
+      ),
     ).not.toBeInTheDocument();
     vi.mocked(desktop.getProviderSettings).mockResolvedValue({
       provider: "ollama" as const,
@@ -616,10 +626,57 @@ describe("conversation controls", () => {
     ).toBeDisabled();
     expect(screen.getByRole("button", { name: "Settings" })).toBeDisabled();
 
+    fireEvent.click(screen.getByRole("button", { name: "Stop reply" }));
+    const stopping = screen.getByRole("button", { name: "Stopping reply" });
+    expect(stopping).toBeDisabled();
+    fireEvent.click(stopping);
+    expect(desktop.cancelTurn).toHaveBeenCalledOnce();
+
     await act(async () => {
       turn.resolve();
       await turn.promise;
     });
+  });
+
+  it("flushes frame-batched reply chunks before marking the reply complete", async () => {
+    vi.mocked(desktop.sendMessage).mockImplementation(async ({ onEvent }) => {
+      onEvent({
+        type: "message",
+        message: {
+          id: "batched-reply",
+          sessionId: session.id,
+          role: "assistant",
+          content: "",
+          status: "streaming",
+          createdAt: session.createdAt,
+        },
+      });
+      onEvent({
+        type: "chunk",
+        messageId: "batched-reply",
+        content: "Frame-batched ",
+      });
+      onEvent({
+        type: "chunk",
+        messageId: "batched-reply",
+        content: "reply.",
+      });
+      onEvent({
+        type: "finished",
+        messageId: "batched-reply",
+        status: "complete",
+      });
+    });
+    await openConnectedApp();
+
+    submit("Please send a synthetic streamed reply.");
+
+    expect(await screen.findByText("Frame-batched reply.")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Stop reply" }),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("shows scoped off status only in the conversation and skips disabled updates", async () => {
@@ -1099,7 +1156,9 @@ describe("ChatGPT demo consent", () => {
     fireEvent.click(
       screen.getByRole("button", { name: /Save and check connection/ }),
     );
-    await screen.findByText("Connection saved. Ready for a conversation.");
+    await screen.findByText(
+      "The connection and selected model are reachable. Chat and memory quality have not been verified.",
+    );
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     fireEvent.click(
       screen.getAllByRole("button", { name: /Monday conversation/ })[0]!,

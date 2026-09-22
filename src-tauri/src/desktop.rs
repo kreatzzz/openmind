@@ -511,39 +511,38 @@ async fn check_provider_health(state: State<'_, DesktopState>) -> Result<Provide
     } else {
         ProviderDestination::Remote
     };
-    let capabilities = ProviderCapabilities {
-        streaming: true,
-        structured_notes: true,
-    };
     let result = match provider {
-        ProviderKind::Ollama => provider::list_models(&connection.base_url)
+        ProviderKind::Ollama => {
+            provider::health(
+                &connection.base_url,
+                &connection.model,
+                tokio_util::sync::CancellationToken::new(),
+            )
             .await
-            .map(|models| {
-                if connection.model.is_empty()
-                    || !models.iter().any(|model| model.name == connection.model)
-                {
-                    Err(ProviderError::InvalidModel)
-                } else {
-                    Ok(())
-                }
-            })
-            .and_then(|value| value),
-        ProviderKind::Codex => codex::health(&connection.model).await,
+        }
+        ProviderKind::Codex => codex::health(&connection.model).await.map(|()| None),
         ProviderKind::OpenAiCompatible => match connection.api_key.as_ref() {
-            Some(key) => {
-                remote::health(
-                    &connection.base_url,
-                    key,
-                    tokio_util::sync::CancellationToken::new(),
-                )
-                .await
-            }
+            Some(key) => remote::health(
+                &connection.base_url,
+                &connection.model,
+                key,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .map(|()| None),
             None => Err(ProviderError::CredentialRequired),
         },
     };
     state.0.require_unlocked()?;
+    let streaming = result.as_ref().ok().copied().flatten();
     let (status, message) = match result {
-        Ok(()) => (ProviderHealthStatus::Ready, None),
+        Ok(_) => (
+            ProviderHealthStatus::Ready,
+            Some(
+                "The connection and selected model are reachable. Chat and memory quality have not been verified."
+                    .into(),
+            ),
+        ),
         Err(
             ProviderError::CredentialRequired
             | ProviderError::CredentialRejected
@@ -570,7 +569,10 @@ async fn check_provider_health(state: State<'_, DesktopState>) -> Result<Provide
         status,
         destination,
         model: connection.model,
-        capabilities,
+        capabilities: ProviderCapabilities {
+            streaming,
+            structured_notes: None,
+        },
         message,
     })
 }
