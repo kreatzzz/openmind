@@ -25,9 +25,9 @@ The UI, native consent checks, and first child-process adapter are checked in. A
 
 The adapter requests ephemeral threads, uses temporary working/log/state paths, disables tool features, explicitly disables inherited MCP servers, and checks their runtime status before sending source text. Unit tests cover MCP-state rejection, final-message filtering, unexpected tool items, and cancellation before startup. Those tests do not establish isolation across every Codex version.
 
-**Live subscription generation and native end-to-end verification remain pending.** This is today's checkpoint, not a completed remote-provider milestone. The local Ollama workflow remains the verified testing path.
+Live subscription generation now passes through the Rust adapter on Windows, including structured-note validation and the synthetic [conversation quality evaluation](evaluations/conversation-quality-2026-09-22.md). Native UI end-to-end verification and macOS runtime testing remain pending. This is not a completed remote-provider qualification.
 
-The adapter checks the executable version and `app-server --help --stdio` before use. `OPENMIND_CODEX_PATH` can select an absolute executable path. On Windows, discovery checks the official stable location and a bounded set of versioned subdirectories before PATH. The installed Codex `0.154.0-alpha.6.2` passed these probes on September 16; that does not establish live reply or notes operation.
+The adapter checks the executable version and `app-server --help --stdio` before use. `OPENMIND_CODEX_PATH` can select an absolute executable path. On Windows, discovery checks the official stable location and a bounded set of versioned subdirectories before PATH. Codex `0.155.0-alpha.9.2` passed the live Rust-adapter checks on September 22.
 
 ## Next session
 
@@ -38,4 +38,4 @@ OPENMIND_TEST_CODEX_MODEL=gpt-5.6-luna \
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features live_codex_reply_and_notes -- --ignored
 ```
 
-Then verify the native provider selector, consent, reply streaming, notes, and Stop/Lock behavior. Inspect the ephemeral-thread and child-process cleanup behavior before describing the bridge as ready. macOS and Windows runtime testing of Codex remains outstanding.
+Then verify the native provider selector, consent, reply streaming, notes, and Stop/Lock behavior. Inspect the ephemeral-thread and child-process cleanup behavior before describing the bridge as ready. Native UI verification on Windows and all macOS runtime testing remain outstanding.

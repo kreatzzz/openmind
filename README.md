@@ -32,6 +32,7 @@ On Windows, first run `. ./scripts/windows-env.ps1` in the same PowerShell termi
 | [Memory](docs/memory.md) | Graph schema, evidence, retrieval, corrections, and forgetting |
 | [Memory research and next steps](docs/memory-research.md) | Psychology-informed categories, local hybrid retrieval, evaluation, and an incremental implementation proposal |
 | [Memory evaluation](docs/evaluations/memory-quality-2026-09-16.md) | Synthetic retrieval results, live model behavior, correction, forgetting, and recovery checks |
+| [Conversation evaluation](docs/evaluations/conversation-quality-2026-09-22.md) | Live synthetic trauma and family-dialogue review, prompt failures, revisions, and remaining gaps |
 | [Desktop release](docs/desktop-release.md) | Native artifacts, signing prerequisites, installer checks, and remaining release work |
 | [Native lifecycle checks](docs/native-lifecycle-checks.md) | Implemented lock signals, automated coverage, and physical-device checks |
 | [Engineering readiness](docs/engineering-readiness.md) | What works now, prioritized gaps, and concrete completion conditions |
