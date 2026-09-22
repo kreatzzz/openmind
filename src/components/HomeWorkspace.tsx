@@ -269,7 +269,7 @@ function LockCaption({ sample }: { sample: boolean }) {
   return (
     <span>
       {sample
-        ? "Example conversations · changes stay in this browser tab"
+        ? "Changes stay in this browser tab"
         : "Conversations are encrypted in your workspace"}
     </span>
   );

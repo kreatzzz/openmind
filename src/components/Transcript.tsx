@@ -1,7 +1,9 @@
 import { memo, useEffect, type RefObject } from "react";
+import { MessageScroller } from "@shadcn/react/message-scroller";
 import { Square } from "lucide-react";
 import type { Message, Session } from "../lib/desktop";
 import { Mark } from "./Mark";
+import { ModelActivity } from "./ModelActivity";
 
 const TranscriptMessage = memo(function TranscriptMessage({
   message,
@@ -25,14 +27,16 @@ const TranscriptMessage = memo(function TranscriptMessage({
           </>
         ) : (
           <>
-            <span className="user-mark" />
+            <span className="user-mark" aria-hidden="true" />
             You
           </>
         )}
       </div>
       <div className="message-content">
         {message.content ||
-          (message.status === "streaming" ? "Preparing a reply" : "")}
+          (message.status === "streaming" ? (
+            <ModelActivity phase="preparing" />
+          ) : null)}
       </div>
       {message.status === "interrupted" && (
         <p className="interrupted">
@@ -67,59 +71,78 @@ export function Transcript({
         ?.scrollIntoView?.({ block: "center" });
   }, [highlight]);
   return (
-    <div className="transcript-scroll" ref={scroll} onScroll={onScroll}>
-      <div className="conversation-column">
-        {messages.length ? (
-          <>
-            <div className="conversation-title">
-              <div className="eyebrow">
-                <span className="margin-line" aria-hidden="true" />
-                {sample ? "A SAMPLE CONVERSATION" : "YOUR CONVERSATION"}
+    <MessageScroller.Provider autoScroll={false} defaultScrollPosition="end">
+      <MessageScroller.Root className="transcript-scroller">
+        <MessageScroller.Viewport
+          className="transcript-scroll"
+          ref={scroll}
+          onScroll={onScroll}
+          aria-label="Conversation transcript"
+        >
+          <div className="conversation-column">
+            {messages.length ? (
+              <>
+                <div className="conversation-title">
+                  <div className="eyebrow">
+                    <span className="margin-line" aria-hidden="true" />
+                    {sample ? "CONVERSATION" : "YOUR CONVERSATION"}
+                  </div>
+                  <h1>{session?.title ?? "A moment to reflect"}</h1>
+                  <p className="conversation-date">
+                    {sample
+                      ? "Monday, September 7"
+                      : session
+                        ? new Date(session.createdAt).toLocaleDateString(
+                            undefined,
+                            { weekday: "long", month: "long", day: "numeric" },
+                          )
+                        : ""}
+                  </p>
+                </div>
+                <MessageScroller.Content
+                  className="messages"
+                  aria-label="Messages"
+                  aria-busy={messages.some(
+                    (message) => message.status === "streaming",
+                  )}
+                  aria-relevant="additions"
+                  style={{ fontSize }}
+                >
+                  {messages.map((message) => (
+                    <MessageScroller.Item
+                      className="message-item"
+                      key={message.id}
+                      messageId={message.id}
+                      scrollAnchor={message.role === "user"}
+                    >
+                      <TranscriptMessage
+                        message={message}
+                        highlighted={highlight === message.id}
+                      />
+                    </MessageScroller.Item>
+                  ))}
+                </MessageScroller.Content>
+              </>
+            ) : (
+              <div className="empty-conversation">
+                <div className="eyebrow">
+                  <span className="margin-line" aria-hidden="true" />
+                  NEW CONVERSATION
+                </div>
+                <h1>What's on your mind?</h1>
+                <p>
+                  Start wherever you are.
+                  <br />A thought, a question, or something from your day.
+                </p>
+                <div className="empty-line" />
+                <span className="empty-caption">
+                  There is no right way to begin.
+                </span>
               </div>
-              <h1>{session?.title ?? "A moment to reflect"}</h1>
-              <p className="conversation-date">
-                {sample
-                  ? "Monday, September 7"
-                  : session
-                    ? new Date(session.createdAt).toLocaleDateString(
-                        undefined,
-                        { weekday: "long", month: "long", day: "numeric" },
-                      )
-                    : ""}
-              </p>
-            </div>
-            <div
-              className="messages"
-              aria-label="Conversation transcript"
-              style={{ fontSize }}
-            >
-              {messages.map((message) => (
-                <TranscriptMessage
-                  key={message.id}
-                  message={message}
-                  highlighted={highlight === message.id}
-                />
-              ))}
-            </div>
-          </>
-        ) : (
-          <div className="empty-conversation">
-            <div className="eyebrow">
-              <span className="margin-line" aria-hidden="true" />
-              NEW CONVERSATION
-            </div>
-            <h1>What's on your mind?</h1>
-            <p>
-              Start wherever you are.
-              <br />A thought, a question, or something from your day.
-            </p>
-            <div className="empty-line" />
-            <span className="empty-caption">
-              There is no right way to begin.
-            </span>
+            )}
           </div>
-        )}
-      </div>
-    </div>
+        </MessageScroller.Viewport>
+      </MessageScroller.Root>
+    </MessageScroller.Provider>
   );
 }

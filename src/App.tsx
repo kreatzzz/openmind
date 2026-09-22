@@ -1,8 +1,13 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   ArrowDown,
   ArrowRight,
-  ArrowUp,
   Brain,
   CalendarDays,
   House,
@@ -20,7 +25,6 @@ import {
   Search,
   Ghost,
   Trash2,
-  Square,
   X,
 } from "lucide-react";
 import { Dialog } from "./components/Dialog";
@@ -30,6 +34,8 @@ import { WelcomeScreen } from "./components/WelcomeScreen";
 import { Notebook } from "./components/Notebook";
 import { MemoryWorkspace } from "./components/MemoryWorkspace";
 import { Transcript } from "./components/Transcript";
+import { ChatComposer } from "./components/ChatComposer";
+import { DictationControl } from "./components/DictationControl";
 import { HomeWorkspace } from "./components/HomeWorkspace";
 import { PlannedSessions } from "./components/PlannedSessions";
 import { PrivacySettings } from "./components/PrivacySettings";
@@ -37,6 +43,7 @@ import { RestoreWorkspace } from "./components/RestoreWorkspace";
 import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
 import { MemoryIndexSettings } from "./components/MemoryIndexSettings";
 import { resetSamplePlans } from "./lib/plans";
+import { useLocalDictation } from "./hooks/useLocalDictation";
 import {
   AppearanceSettings,
   COLOR_THEMES,
@@ -233,6 +240,46 @@ export default function App() {
   const fontSize = Math.round((17 * reading.textScalePercent) / 100);
   const enterToSend = reading.enterToSend;
   const session = sessions.find((item) => item.id === selected);
+  const hasReplyContent = messages.some(
+    (message) =>
+      message.role === "assistant" &&
+      message.status === "streaming" &&
+      message.content.length > 0,
+  );
+  const dictationDisabled =
+    busy ||
+    sending ||
+    sample ||
+    screen !== "conversation" ||
+    home ||
+    notes ||
+    memoryView ||
+    settings ||
+    plansOpen ||
+    conversationControls ||
+    deleteConversation ||
+    restoreOpen ||
+    drawer;
+  const dictationSelection = useCallback(() => {
+    const field = composer.current;
+    return {
+      start: field?.selectionStart ?? draft.length,
+      end: field?.selectionEnd ?? draft.length,
+    };
+  }, [draft.length]);
+  const dictation = useLocalDictation({
+    language:
+      typeof navigator === "undefined" || !navigator.language
+        ? "en-US"
+        : navigator.language.toLowerCase().startsWith("en")
+          ? navigator.language
+          : "en-US",
+    value: draft,
+    onValueChange: setDraftValue,
+    selection: dictationSelection,
+    sessionKey: selected,
+    disabled: dictationDisabled,
+  });
 
   function discardPendingChunks() {
     if (chunkFlushFrame.current !== null) {
@@ -1011,7 +1058,15 @@ export default function App() {
   }
   async function send(event?: FormEvent) {
     event?.preventDefault();
-    if (!draft.trim() || activeTurn.current || busy || sample) return;
+    if (
+      !draft.trim() ||
+      activeTurn.current ||
+      busy ||
+      sample ||
+      dictation.phase === "listening" ||
+      dictation.phase === "finishing"
+    )
+      return;
     if (!connected || !model || (provider !== "ollama" && !remoteConsent)) {
       setSettings(true);
       return;
@@ -1695,73 +1750,47 @@ export default function App() {
                         </button>
                       </div>
                     ) : (
-                      <form className="composer" onSubmit={send}>
-                        <label className="sr-only" htmlFor="message">
-                          Your message
-                        </label>
-                        <textarea
-                          ref={composer}
-                          id="message"
-                          rows={2}
-                          value={draft}
-                          onChange={(event) =>
-                            setDraftValue(event.target.value)
-                          }
-                          placeholder="What's on your mind?"
-                          disabled={busy}
-                          onKeyDown={(event) => {
-                            if (
-                              event.key === "Enter" &&
-                              !event.nativeEvent.isComposing &&
-                              event.keyCode !== 229 &&
-                              (enterToSend
-                                ? !event.shiftKey
-                                : event.metaKey || event.ctrlKey)
-                            ) {
-                              event.preventDefault();
-                              void send();
-                            }
-                          }}
-                        />
-                        <div className="composer-toolbar">
-                          <span>
-                            {sending
-                              ? stopping
-                                ? "Stopping reply"
-                                : noteStatus || "Generating a reply"
-                              : enterToSend
-                                ? "Shift + Enter for a new line"
-                                : "Ctrl / ⌘ + Enter to send"}
-                          </span>
-                          {sending ? (
-                            <button
-                              className="send-button"
-                              type="button"
-                              aria-label={
-                                stopping ? "Stopping reply" : "Stop reply"
-                              }
-                              onClick={stop}
-                              disabled={stopping}
-                            >
-                              <Square size={16} fill="currentColor" />
-                            </button>
-                          ) : (
-                            <button
-                              className="send-button"
-                              type="submit"
-                              aria-label={
-                                connected &&
-                                (provider === "ollama" || remoteConsent)
-                                  ? "Send message"
-                                  : "Set up model connection"
-                              }
-                              disabled={!draft.trim() || busy}
-                            >
-                              <ArrowUp size={20} />
-                            </button>
-                          )}
-                        </div>
-                      </form>
+                      <ChatComposer
+                        value={draft}
+                        onValueChange={setDraftValue}
+                        onSubmit={send}
+                        onStop={stop}
+                        textareaRef={composer}
+                        disabled={busy}
+                        enterToSend={enterToSend}
+                        sending={sending}
+                        stopping={stopping}
+                        hasReplyContent={hasReplyContent}
+                        noteStatus={noteStatus}
+                        connectionReady={
+                          connected && (provider === "ollama" || remoteConsent)
+                        }
+                        leadingControls={
+                          <DictationControl
+                            phase={dictation.phase}
+                            message={dictation.message}
+                            disabled={busy || sending}
+                            onInstall={() => void dictation.install()}
+                            onStart={() => void dictation.start()}
+                            onFinish={dictation.finish}
+                            onCancel={dictation.cancel}
+                          />
+                        }
+                        voiceState={
+                          dictation.phase === "listening"
+                            ? "listening"
+                            : dictation.phase === "finishing"
+                              ? "processing"
+                              : "idle"
+                        }
+                        voiceTheme={
+                          appearance === "dark"
+                            ? "dark"
+                            : appearance === "light"
+                              ? "light"
+                              : "auto"
+                        }
+                      />
                     )}
                     <div className="notes-update-row">
                       {noteStatus && (
@@ -1788,7 +1817,7 @@ export default function App() {
                     <div className="composer-footnote">
                       <span>
                         {sample ? (
-                          "Example conversation · not saved"
+                          "Changes in this browser tab are not saved"
                         ) : connected ? (
                           <>
                             <span className="status-dot" />{" "}

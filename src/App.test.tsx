@@ -58,6 +58,12 @@ vi.mock("./lib/desktop", () => ({
   },
 }));
 
+vi.mock("thinking-orbs", () => ({
+  ThinkingOrb: ({ state }: { state: string }) => (
+    <span data-testid="thinking-orb" data-state={state} />
+  ),
+}));
+
 const session: Session = {
   id: "synthetic-session",
   title: "Monday conversation",
@@ -302,6 +308,11 @@ describe("native conversation lifecycle", () => {
     });
     await openConnectedApp();
     submit("A synthetic thought.");
+    expect(screen.getByRole("status")).toHaveTextContent("Preparing a reply");
+    expect(screen.getAllByTestId("thinking-orb")[0]).toHaveAttribute(
+      "data-state",
+      "working",
+    );
     act(() =>
       emit?.({ type: "finished", messageId: "reply", status: "complete" }),
     );

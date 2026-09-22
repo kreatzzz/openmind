@@ -17,6 +17,7 @@ Planning began September 6, 2026; requirements updated September 16, 2026. A des
 - A bridge to the developer's OpenAI subscription for testing, requested September 8. The implementation uses the existing ChatGPT sign-in through Codex, subject to verification.
 - Clinical therapy is the intended product scope. Specific indications and clinical delivery model remain open.
 - Streamed text responses from the model at launch; text-to-speech output comes later, with ElevenLabs as an example provider.
+- Local speech-to-text is an editable composer input. It starts only on explicit user action, never auto-submits, and must fail closed when on-device recognition cannot be proven. The current runtime capability path is implemented; a consistent native Windows/macOS backend remains release work.
 - Three results from submitted input: updated encrypted internal notes, a response, and updated notes for the user. Execution order and optimization are delegated to architecture design.
 
 The subscription adapter is available in native personal and example workspaces with explicit remote-data consent. Personal vaults can use ChatGPT through the device's existing Codex sign-in or the separate OpenAI-compatible adapter. See [Codex testing](codex-testing.md).
@@ -34,7 +35,7 @@ The subscription adapter is available in native personal and example workspaces 
 | Memory organization | Seven overlapping views over source-backed records; sensitivity independent of category | [Research proposal](memory-research.md) distinguishes psychological frameworks from our product taxonomy; no mandatory trauma folder |
 | Memory retrieval | Encrypted FTS5 baseline, then local vector search and rank fusion in the same vault | Adds relevance to current correction/recency ordering while preserving permissions, correction, and forgetting; extensions require benchmarks |
 | Identity | One local profile; no account or authentication service | Offline use and no account backend; additional profiles can come later |
-| Input | Typing plus local speech-to-text, pending clarification | Interpret "switch to text" as speech-to-text; transcriptions become editable drafts before submission |
+| Input | Typing plus local speech-to-text | Transcriptions become editable drafts before submission; never fall back to a remote recognizer implicitly |
 | Turn execution | Stream a reply, then run one structured call for both note sets | Two main model calls, bounded work, no wait for note generation before replying |
 | User notes | A separate editable notebook with source-linked takeaways and agreed next steps | Different content and access rules from internal memory; both encrypted at rest |
 | Language | English for the first evaluated release | Other languages require their own behavioral and resource evaluations |
@@ -46,7 +47,7 @@ The subscription adapter is available in native personal and example workspaces 
 
 Krish confirmed clinical therapy on September 7. The old adult self-reflection positioning is superseded. Adults remain the proposed initial population, not a confirmed age requirement. Clinical delivery might be independent or clinician-supported; the question has been raised and remains open.
 
-The input phrase "text and switch to text" is interpreted as typing and speech-to-text. Confirmation has been requested. Streamed text output and later text-to-speech are explicit requirements. Local speech recognition is the proposed default; ElevenLabs is a later output-provider candidate, not a requirement to send microphone audio to a cloud service.
+Typing and speech-to-text are confirmed inputs. Streamed text output and later text-to-speech are explicit requirements. Local speech recognition is the required default; ElevenLabs is a later output-provider candidate and is not authorized to receive microphone audio.
 
 The memory question was unclear to Krish, so the access decision remains open. In plain language: encryption can protect copied files and hide internal notes from ordinary app use, but someone controlling the computer can inspect the decrypted information used by the model. The current recommendation is hidden internal notes plus separate user notes and correction/deletion controls. This explanation does not constitute user approval of the access policy.
 

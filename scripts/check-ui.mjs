@@ -95,6 +95,12 @@ try {
   await expect(page.getByRole("heading", { name: /^Good (morning|afternoon|evening)\.$/ })).toBeVisible();
   await capture("overview-light");
 
+  await page.getByRole("complementary", { name: "Workspace navigation" }).getByRole("button", { name: /Making room for a slower week/ }).click();
+  const transcript = page.getByRole("region", { name: "Conversation transcript" });
+  await expect(transcript).toBeVisible();
+  await expect(transcript.getByRole("article")).toHaveCount(4);
+  await capture("conversation-light");
+
   await navigate("Your notes");
   await page.getByRole("button", { name: "Edit note", exact: true }).first().click();
   await page.getByRole("textbox", { name: "Edit note", exact: true }).fill("A synthetic note used only for browser verification.");
@@ -149,7 +155,7 @@ try {
   await navigate("Settings");
   await capture("settings-200-percent-layout");
   expect(errors).toEqual([]);
-  console.log("Browser checks passed: onboarding, notebook edit, memory search/forget confirmation, theme colors, focus return, narrow layouts, and a 200%-zoom-equivalent viewport. Actual native zoom, accessibility, and model behavior are separate checks.");
+  console.log("Browser checks passed: onboarding, conversation transcript, notebook edit, memory search/forget confirmation, theme colors, focus return, narrow layouts, and a 200%-zoom-equivalent viewport. Actual native zoom, accessibility, dictation, and model behavior are separate checks.");
 } catch (error) {
   await page.screenshot({ path: path.join(output, "failure.png"), fullPage: true }).catch(() => {});
   throw error;
