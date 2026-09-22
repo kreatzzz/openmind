@@ -43,7 +43,7 @@ Turning a switch off also revokes that output for outstanding updates in the con
 
 ## Subscription bridge checkpoint
 
-An experimental ChatGPT subscription adapter using Codex App Server is checked in for the native demo, with explicit remote consent enforced in Rust. CLI sign-in and model discovery were probed; live adapter generation and native integration still need verification. See [the checkpoint and next steps](codex-testing.md).
+An experimental ChatGPT subscription adapter using Codex App Server is available in native personal and example workspaces, with explicit remote consent enforced in Rust. CLI sign-in, model discovery, live generation, and structured notes have passed synthetic Windows tests; native UI and macOS runtime verification remain. See [the checkpoint and next steps](codex-testing.md).
 
 ## Not implemented
 

@@ -1110,13 +1110,8 @@ describe("remembered context workspace", () => {
   });
 });
 
-describe("ChatGPT demo consent", () => {
+describe("ChatGPT subscription consent", () => {
   async function chooseCodex() {
-    vi.mocked(desktop.getVaultStatus).mockResolvedValue({
-      exists: true,
-      unlocked: true,
-      isDemo: true,
-    });
     vi.mocked(desktop.listCodexModels).mockResolvedValue([
       { name: "synthetic-codex-model", size: 0 },
     ]);
@@ -1204,13 +1199,10 @@ describe("ChatGPT demo consent", () => {
       }),
     ).not.toBeChecked();
   });
-  it("explains that ChatGPT testing is limited to the example workspace", async () => {
+  it("offers ChatGPT in a personal vault", async () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Model connection" }));
-    expect(screen.getByRole("button", { name: /ChatGPT/ })).toBeDisabled();
-    expect(
-      screen.getByText(/ChatGPT through your Codex subscription/),
-    ).toBeVisible();
+    expect(screen.getByRole("button", { name: /ChatGPT/ })).toBeEnabled();
   });
 });

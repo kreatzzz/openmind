@@ -19,7 +19,7 @@ bun install --frozen-lockfile
 bun run tauri dev
 ```
 
-On Windows, first run `. ./scripts/windows-env.ps1` in the same PowerShell terminal. Create a workspace, protect it with a passphrase, then connect an installed Ollama model in Settings. The optional example workspace contains fictional conversations and stays separate from the personal vault.
+On Windows, first run `. ./scripts/windows-env.ps1` in the same PowerShell terminal. Create a workspace, protect it with a passphrase, then connect Ollama, a ChatGPT subscription through Codex, or a compatible API in Settings. The optional example workspace contains fictional conversations and stays separate from the personal vault.
 
 `bun run dev` opens the browser interface at `http://127.0.0.1:1420`. The browser can exercise layout, themes, notes, and context controls with example data; encrypted storage and model connections require the desktop app. See [Linux launch troubleshooting](docs/prototype.md#linux-startup-troubleshooting) if the desktop window fails to open.
 

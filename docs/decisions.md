@@ -19,7 +19,7 @@ Planning began September 6, 2026; requirements updated September 16, 2026. A des
 - Streamed text responses from the model at launch; text-to-speech output comes later, with ElevenLabs as an example provider.
 - Three results from submitted input: updated encrypted internal notes, a response, and updated notes for the user. Execution order and optimization are delegated to architecture design.
 
-The subscription testing adapter is limited to the native demo workspace with explicit remote-data consent. Personal vaults use the separate OpenAI-compatible adapter with explicit remote-data consent. See [Codex testing](codex-testing.md).
+The subscription adapter is available in native personal and example workspaces with explicit remote-data consent. Personal vaults can use ChatGPT through the device's existing Codex sign-in or the separate OpenAI-compatible adapter. See [Codex testing](codex-testing.md).
 
 ## Proposed decisions
 

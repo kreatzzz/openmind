@@ -1099,12 +1099,6 @@
   font-size: 11px;
   line-height: 1.45;
 }
-.provider-availability {
-  margin: -8px 0 20px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.65;
-}
 .provider-settings > .secondary-button {
   margin-top: 16px;
 }

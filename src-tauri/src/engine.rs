@@ -22,10 +22,8 @@ use crate::{
     vault::Vault,
 };
 
-const CODEX_DEMO_ONLY_ERROR: &str = "ChatGPT via Codex is available only in the demo vault.";
 const CODEX_CONSENT_REQUIRED_ERROR: &str =
     "Confirm remote processing consent before using ChatGPT via Codex.";
-const DEMO_REQUIRED_ERROR: &str = "Open the demo vault before using ChatGPT via Codex.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -414,17 +412,6 @@ impl Engine {
         Ok(())
     }
 
-    pub fn require_demo(&self) -> Result<(), String> {
-        let state = self.state()?;
-        if !state.is_demo {
-            return Err(DEMO_REQUIRED_ERROR.into());
-        }
-        if state.vault.is_none() {
-            return Err(DEMO_REQUIRED_ERROR.into());
-        }
-        Ok(())
-    }
-
     pub fn list_sessions(&self) -> Result<Vec<Session>, String> {
         let state = self.state()?;
         let mut sessions = state
@@ -676,7 +663,7 @@ impl Engine {
         {
             return Err("Provider settings changed. Refresh settings before sending.".into());
         }
-        authorize_provider(&state, &settings)?;
+        authorize_provider(&settings)?;
         if content.trim().is_empty() || content.len() > 6_000 {
             return Err("Write a message of up to 6,000 UTF-8 bytes before sending.".into());
         }
@@ -1551,7 +1538,7 @@ impl Engine {
             if provider != settings.provider || remote_consent != settings.remote_data_consent {
                 return Err("The saved notes job has different provider settings.".into());
             }
-            authorize_provider(&state, &settings)?;
+            authorize_provider(&settings)?;
         }
         prepare_notes_locked(&mut state, message_id)
     }
@@ -1881,13 +1868,10 @@ impl Engine {
     }
 }
 
-fn authorize_provider(state: &State, settings: &ProviderSettings) -> Result<(), String> {
+fn authorize_provider(settings: &ProviderSettings) -> Result<(), String> {
     match settings.provider {
         ProviderKind::Ollama => Ok(()),
         ProviderKind::Codex => {
-            if !state.is_demo {
-                return Err(CODEX_DEMO_ONLY_ERROR.into());
-            }
             if !settings.remote_data_consent {
                 return Err(CODEX_CONSENT_REQUIRED_ERROR.into());
             }
@@ -2692,7 +2676,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_requires_demo_and_consent_before_turn_or_notes_mutation() {
+    fn codex_requires_consent_before_personal_turn_or_notes_mutation() {
         let temp = tempfile::tempdir().unwrap();
         let engine = Engine::new(temp.path().join("vault"));
         engine.unlock(PASSPHRASE, true).unwrap();
@@ -2709,61 +2693,6 @@ mod tests {
         );
 
         let defaults = engine.provider_settings().unwrap();
-        let codex_settings = engine
-            .update_provider_settings(
-                ProviderKind::Codex,
-                "",
-                "synthetic-model",
-                true,
-                defaults.revision,
-                None,
-                false,
-            )
-            .unwrap();
-
-        let error = engine
-            .prepare_turn_with_provider(
-                &session.id,
-                "This unauthorized synthetic turn must not persist.",
-                ProviderKind::Codex,
-                true,
-            )
-            .err()
-            .expect("personal Codex turn should be rejected");
-        assert_eq!(error, CODEX_DEMO_ONLY_ERROR);
-        assert!(engine.list_messages(&session.id).unwrap().is_empty());
-        assert_eq!(engine.require_demo().unwrap_err(), DEMO_REQUIRED_ERROR);
-
-        engine
-            .update_provider_settings(
-                ProviderKind::Ollama,
-                "http://127.0.0.1:11434",
-                "synthetic-model",
-                false,
-                codex_settings.revision,
-                None,
-                false,
-            )
-            .unwrap();
-
-        let turn = engine
-            .prepare_turn(&session.id, "A synthetic Ollama turn.")
-            .unwrap();
-        engine
-            .finish_turn(&turn.assistant.id, MessageStatus::Complete)
-            .unwrap();
-        let ollama_notes = engine
-            .prepare_notes(&turn.assistant.id)
-            .unwrap()
-            .expect("Ollama notes should still claim the pending job");
-        engine.finish_notes(&ollama_notes.attempt_id, None).unwrap();
-
-        engine.lock().unwrap();
-        engine.open_demo(DEMO_ID, DEMO_PASSPHRASE).unwrap();
-        assert!(engine.require_demo().is_ok());
-        let demo_session = engine.list_sessions().unwrap().remove(0);
-        let before = engine.list_messages(&demo_session.id).unwrap().len();
-        let defaults = engine.provider_settings().unwrap();
         let no_consent = engine
             .update_provider_settings(
                 ProviderKind::Codex,
@@ -2775,9 +2704,10 @@ mod tests {
                 false,
             )
             .unwrap();
+
         let error = engine
             .prepare_turn_with_provider(
-                &demo_session.id,
+                &session.id,
                 "This synthetic remote turn lacks consent.",
                 ProviderKind::Codex,
                 false,
@@ -2785,10 +2715,7 @@ mod tests {
             .err()
             .expect("Codex without consent should be rejected");
         assert_eq!(error, CODEX_CONSENT_REQUIRED_ERROR);
-        assert_eq!(
-            engine.list_messages(&demo_session.id).unwrap().len(),
-            before
-        );
+        assert!(engine.list_messages(&session.id).unwrap().is_empty());
 
         engine
             .update_provider_settings(
@@ -2804,8 +2731,8 @@ mod tests {
 
         let allowed = engine
             .prepare_turn_with_provider(
-                &demo_session.id,
-                "An allowed synthetic Codex turn.",
+                &session.id,
+                "An allowed synthetic Codex turn in a personal vault.",
                 ProviderKind::Codex,
                 true,
             )
@@ -2816,7 +2743,7 @@ mod tests {
         let notes = engine
             .prepare_notes_with_provider(&allowed.assistant.id, ProviderKind::Codex, true)
             .unwrap()
-            .expect("allowed Codex notes should claim the job");
+            .expect("consented personal Codex notes should claim the job");
         engine.finish_notes(&notes.attempt_id, None).unwrap();
     }
 

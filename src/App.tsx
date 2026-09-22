@@ -139,7 +139,6 @@ export default function App() {
     isDesktop ? "loading" : "browser",
   );
   const [sample, setSample] = useState(false);
-  const [isDemo, setIsDemo] = useState(false);
   const [userNotes, setUserNotes] = useState<UserNote[]>([]);
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [memoryError, setMemoryError] = useState("");
@@ -416,7 +415,6 @@ export default function App() {
       .getVaultStatus()
       .then(async (status) => {
         if (ignore) return;
-        setIsDemo(status.isDemo);
         if (status.unlocked) await loadSessions();
         else setScreen(status.exists ? "locked" : "setup");
       })
@@ -574,8 +572,7 @@ export default function App() {
       setBusy(true);
       setError("");
       try {
-        const status = await desktop.openDemo("demo", "openmind-demo-2026");
-        setIsDemo(status.isDemo);
+        await desktop.openDemo("demo", "openmind-demo-2026");
         await loadSessions();
       } catch (reason) {
         setError(errorText(reason));
@@ -586,7 +583,6 @@ export default function App() {
     }
     generation.current++;
     setSample(true);
-    setIsDemo(true);
     setUserNotes([
       {
         id: "sample-note",
@@ -665,7 +661,6 @@ export default function App() {
     setRemoteConsent(false);
     setConnected(false);
     setSample(false);
-    setIsDemo(false);
     setConversationControls(false);
     setNotes(false);
     setUserNotes([]);
@@ -809,7 +804,6 @@ export default function App() {
     activeTurn.current = false;
     stopRequested.current = false;
     setMessages([]);
-    setIsDemo(false);
     setUserNotes([]);
     setMemories([]);
     setMemoryError("");
@@ -1958,7 +1952,6 @@ export default function App() {
               {settingsPage === "connection" && (
                 <ProviderSettingsPanel
                   sample={sample}
-                  isDemo={isDemo}
                   onSaved={applyProviderSettings}
                 />
               )}{" "}

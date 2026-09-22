@@ -25,11 +25,9 @@ const DEFAULT: ProviderSettings = {
 
 export function ProviderSettingsPanel({
   sample,
-  isDemo,
   onSaved,
 }: {
   sample: boolean;
-  isDemo: boolean;
   onSaved: (settings: ProviderSettings, ready: boolean) => void;
 }) {
   const [settings, setSettings] = useState(DEFAULT);
@@ -145,7 +143,7 @@ export function ProviderSettingsPanel({
     }
   }
   const remote = settings.provider !== "ollama";
-  const codexAvailable = isDemo && !sample;
+  const codexAvailable = !sample;
   return (
     <div className="settings-section provider-settings">
       <h3>Model connection</h3>
@@ -165,15 +163,15 @@ export function ProviderSettingsPanel({
           disabled={!codexAvailable}
           className={settings.provider === "codex" ? "is-selected" : ""}
           aria-pressed={settings.provider === "codex"}
-          aria-describedby={!codexAvailable ? "codex-availability" : undefined}
+          aria-describedby={
+            !codexAvailable ? "provider-desktop-only" : undefined
+          }
           onClick={() => changeProvider("codex")}
         >
           <Globe size={19} />
           <strong>ChatGPT</strong>
           <small>
-            {codexAvailable
-              ? "Use your Codex sign-in"
-              : "Example workspace only"}
+            {codexAvailable ? "Use your Codex sign-in" : "Desktop app only"}
           </small>
         </button>
         <button
@@ -189,18 +187,10 @@ export function ProviderSettingsPanel({
           <small>Endpoint and API key</small>
         </button>
       </div>
-      {!codexAvailable && !sample && (
-        <p id="codex-availability" className="provider-availability">
-          ChatGPT through your Codex subscription is currently available in the
-          example workspace. Lock this vault, then choose Explore with example
-          conversations to test it.
-        </p>
-      )}
       {settings.provider === "codex" ? (
         <p className="field-hint">
           Uses the ChatGPT account signed in to Codex on this device.
-          Subscription limits apply. This connection is available in the example
-          workspace.
+          Subscription limits apply.
         </p>
       ) : (
         <>
@@ -347,7 +337,7 @@ export function ProviderSettingsPanel({
         </div>
       )}
       {sample && (
-        <p className="field-hint">
+        <p id="provider-desktop-only" className="field-hint">
           Open the desktop app to connect a model. This browser workspace uses
           example conversations.
         </p>
