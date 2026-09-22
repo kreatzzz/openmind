@@ -152,6 +152,8 @@ Production assets were loaded through Playwright request interception, with no d
 
 The [memory research proposal](memory-research.md) informed the subsequent [daily-use increment](daily-use-foundation.md), which adds encrypted full-text search, optional local embeddings, provider setup, vault controls, and planned sessions. Clinical validation remains outstanding.
 
+The current implementation and prioritized remaining work are summarized in [engineering readiness](engineering-readiness.md). That page supersedes historical test counts in this document; the sections here remain an implementation record for earlier increments.
+
 ## Conversation controls verification
 
 The conversation-controls increment passes 23 UI tests and 57 core regression tests, the production frontend build, native macOS compilation, formatting, and all-target Clippy with warnings denied. Three opt-in live-provider tests were not run. Tests cover independent output branches, skipping both-disabled jobs, messages submitted while saving was disabled, revocation across restart/re-enable/retry, active-work restrictions, revision conflicts, title limits, and schema-v3 migration preserving forgotten-source exclusions. Earlier schema migrations remain covered.

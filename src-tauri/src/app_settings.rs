@@ -61,8 +61,8 @@ impl Default for ReadingSettings {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCapabilities {
-    pub streaming: bool,
-    pub structured_notes: bool,
+    pub streaming: Option<bool>,
+    pub structured_notes: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -34,6 +34,7 @@ On Windows, first run `. ./scripts/windows-env.ps1` in the same PowerShell termi
 | [Memory evaluation](docs/evaluations/memory-quality-2026-09-16.md) | Synthetic retrieval results, live model behavior, correction, forgetting, and recovery checks |
 | [Desktop release](docs/desktop-release.md) | Native artifacts, signing prerequisites, installer checks, and remaining release work |
 | [Native lifecycle checks](docs/native-lifecycle-checks.md) | Implemented lock signals, automated coverage, and physical-device checks |
+| [Engineering readiness](docs/engineering-readiness.md) | What works now, prioritized gaps, and concrete completion conditions |
 | [Privacy](docs/privacy.md) | Encryption, key management, trust boundaries, backups, and limits of hidden memory |
 | [Conversation policy](docs/conversation-policy.md) | Proposed behavior, crisis handling, and evaluation requirements |
 | [Design](DESIGN.md) | Visual identity, design tokens, screens, interaction, and accessibility |

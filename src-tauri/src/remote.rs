@@ -21,6 +21,8 @@ use crate::{
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MODELS_BODY_BYTES: usize = 1024 * 1024;
+const MAX_MODELS: usize = 4096;
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 const MAX_HISTORY_BYTES: usize = 32 * 1024;
 
@@ -111,11 +113,12 @@ fn status(response: &Response) -> Result<(), ProviderError> {
 
 pub async fn health(
     base_url: &str,
+    model: &str,
     api_key: &str,
     cancel: CancellationToken,
 ) -> Result<(), ProviderError> {
     let endpoint = Endpoint::parse(base_url)?;
-    validate("health-probe", api_key)?;
+    validate(model, api_key)?;
     let client = client()?;
     let response = execute(
         client
@@ -125,7 +128,36 @@ pub async fn health(
         &cancel,
     )
     .await?;
-    status(&response)
+    status(&response)?;
+    let bytes =
+        provider::read_response_body(response, MAX_MODELS_BODY_BYTES, Some(&cancel)).await?;
+    remote_model_is_available(&bytes, model)
+}
+
+fn remote_model_is_available(bytes: &[u8], model: &str) -> Result<(), ProviderError> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|_| ProviderError::MalformedResponse)?;
+    let models = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or(ProviderError::MalformedResponse)?;
+    if models.len() > MAX_MODELS {
+        return Err(ProviderError::ResponseTooLarge);
+    }
+    let mut found = false;
+    for available in models {
+        let id = available
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or(ProviderError::MalformedResponse)?;
+        if id == model {
+            found = true;
+        }
+    }
+    if !found {
+        return Err(ProviderError::InvalidModel);
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -222,13 +254,19 @@ where
                     return Err(ProviderError::ProviderReportedError);
                 }
             }
-            if let Some(content) = value
-                .pointer("/choices/0/delta/content")
-                .and_then(Value::as_str)
-            {
-                if !content.is_empty() {
-                    callback(Ok(content.to_owned()))?;
-                    emitted = true;
+            if let Some(choice) = value.pointer("/choices/0") {
+                match choice.get("finish_reason") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::String(reason)) => {
+                        provider::validate_chat_completion_reason(Some(reason))?;
+                    }
+                    Some(_) => return Err(ProviderError::MalformedResponse),
+                }
+                if let Some(content) = choice.pointer("/delta/content").and_then(Value::as_str) {
+                    if !content.is_empty() {
+                        callback(Ok(content.to_owned()))?;
+                        emitted = true;
+                    }
                 }
             }
         }
@@ -431,6 +469,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compatible_stream_accepts_stop_or_legacy_missing_reason_and_rejects_other_reasons() {
+        for finish_reason in [None, Some("stop")] {
+            let terminal = finish_reason.map_or_else(
+                || "data: [DONE]\n\n".to_owned(),
+                |reason| {
+                    format!(
+                        "data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"{reason}\"}}]}}\n\ndata: [DONE]\n\n"
+                    )
+                },
+            );
+            let body = Box::leak(
+                format!(
+                    "data: {{\"choices\":[{{\"delta\":{{\"content\":\"Synthetic reply.\"}}}}]}}\n\n{terminal}"
+                )
+                .into_boxed_str(),
+            );
+            let (url, request) = mock_response(body, "text/event-stream").await;
+            generate(
+                &url,
+                "synthetic-model",
+                Zeroizing::new("synthetic-key".into()),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "Synthetic prompt".into(),
+                }],
+                CancellationToken::new(),
+                |_| Ok(()),
+            )
+            .await
+            .expect("complete terminal reason");
+            request.await.unwrap();
+        }
+
+        for reason in ["length", "content_filter", "tool_calls", "unexpected"] {
+            let body = Box::leak(
+                format!(
+                    "data: {{\"choices\":[{{\"delta\":{{\"content\":\"Partial.\"}}}}]}}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"{reason}\"}}]}}\n\ndata: [DONE]\n\n"
+                )
+                .into_boxed_str(),
+            );
+            let (url, request) = mock_response(body, "text/event-stream").await;
+            let result = generate(
+                &url,
+                "synthetic-model",
+                Zeroizing::new("synthetic-key".into()),
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: "Synthetic prompt".into(),
+                }],
+                CancellationToken::new(),
+                |_| Ok(()),
+            )
+            .await;
+            request.await.unwrap();
+            assert_eq!(result, Err(ProviderError::IncompleteResponse));
+        }
+    }
+
+    #[test]
+    fn compatible_model_inventory_requires_the_selected_model_and_bounded_shape() {
+        assert_eq!(
+            remote_model_is_available(
+                br#"{"data":[{"id":"synthetic-chat"},{"id":"synthetic-embed"}]}"#,
+                "synthetic-chat"
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            remote_model_is_available(br#"{"data":[{"id":"different-model"}]}"#, "synthetic-chat"),
+            Err(ProviderError::InvalidModel)
+        );
+        assert_eq!(
+            remote_model_is_available(br#"{"models":[]}"#, "synthetic-chat"),
+            Err(ProviderError::MalformedResponse)
+        );
+        assert_eq!(
+            remote_model_is_available(br#"{"data":[{"id":12}]}"#, "synthetic-chat"),
+            Err(ProviderError::MalformedResponse)
+        );
+    }
+
+    #[tokio::test]
     async fn compatible_notes_request_uses_strict_schema() {
         let body = Box::leak(
             json!({"choices":[{"message":{"content":r#"{"memories":[],"notes":[]}"#}}]})
@@ -521,9 +641,14 @@ mod tests {
             "synthetic-secret-in-body",
         )
         .await;
-        let error = health(&redirect, "synthetic-key", CancellationToken::new())
-            .await
-            .unwrap_err();
+        let error = health(
+            &redirect,
+            "synthetic-model",
+            "synthetic-key",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error, ProviderError::HttpStatus(302));
         let message = error.to_string();
         assert!(!message.contains("synthetic-key"));
@@ -535,9 +660,14 @@ mod tests {
             r#"{"error":{"message":"synthetic-key was rejected"}}"#,
         )
         .await;
-        let error = health(&rejected, "synthetic-key", CancellationToken::new())
-            .await
-            .unwrap_err();
+        let error = health(
+            &rejected,
+            "synthetic-model",
+            "synthetic-key",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error, ProviderError::CredentialRejected);
         assert!(!error.to_string().contains("synthetic-key"));
     }

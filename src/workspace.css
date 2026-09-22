@@ -928,15 +928,24 @@
   width: min(820px, calc(100vw - 32px));
   max-width: 820px;
   padding: 0;
+  overflow: hidden;
+}
+.settings-dialog[open] {
+  display: flex;
+  flex-direction: column;
 }
 .settings-dialog > .dialog-heading {
+  flex: none;
   padding: 18px 22px;
   margin: 0;
   border-bottom: 1px solid var(--line);
 }
 .settings-layout {
   display: flex;
-  min-height: 480px;
+  flex: 1;
+  min-height: 0;
+  height: 480px;
+  overflow: hidden;
 }
 .memory-index-settings {
   margin-top: 28px;
@@ -984,6 +993,7 @@
   flex-shrink: 0;
   padding: 16px 10px;
   border-right: 1px solid var(--line);
+  overflow-y: auto;
 }
 .settings-navigation button {
   display: flex;
@@ -1004,7 +1014,9 @@
 .settings-content {
   padding: 24px 28px;
   flex: 1;
+  min-height: 0;
   min-width: 0;
+  overflow-y: auto;
 }
 .settings-content .settings-section {
   margin: 0;
@@ -1020,10 +1032,16 @@
   font-size: 12px;
   line-height: 1.65;
 }
-.settings-dialog > .primary-button {
-  width: auto;
+.settings-footer {
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  padding: 14px 22px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+.settings-footer .primary-button {
   min-width: 78px;
-  margin: 0 22px 18px auto;
 }
 .settings-action-list {
   margin-top: 26px;

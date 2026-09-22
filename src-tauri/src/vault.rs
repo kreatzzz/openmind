@@ -1947,6 +1947,44 @@ impl Vault {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Check one previously selected source without rebuilding and sorting the
+    /// whole pending batch. The final store still repeats the revision and
+    /// eligibility checks inside its write transaction.
+    pub(crate) fn embedding_source_is_pending(
+        &self,
+        model: &str,
+        source: &EmbeddingSource,
+    ) -> Result<bool> {
+        if model.trim().is_empty() || model.len() > 256 {
+            return Ok(false);
+        }
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM memory_records
+                 JOIN messages AS source_message
+                   ON source_message.id = memory_records.source_message_id
+                 WHERE memory_records.id = ?1
+                   AND memory_records.revision = ?2
+                   AND memory_records.content = ?3
+                   AND memory_records.deleted = 0
+                   AND source_message.role = 'user'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM memory_embeddings
+                       WHERE memory_id = memory_records.id
+                         AND model = ?4
+                         AND memory_revision = memory_records.revision
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM memory_exclusions
+                       WHERE source_message_id = memory_records.source_message_id
+                   )
+             )",
+            params![source.memory_id, source.revision, source.content, model],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Commit an embedding only while the source record and its revision are
     /// still active. Corrections and forgetting therefore reject late work.
     pub fn store_memory_embedding(
@@ -4165,6 +4203,149 @@ mod tests {
             .memory_embedding_configuration()
             .expect("cleared configuration")
             .is_none());
+    }
+
+    #[test]
+    fn point_embedding_eligibility_tracks_embedding_correction_and_forgetting() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let memory = save_synthetic_memory(
+            &mut vault,
+            &session.id,
+            "I prefer a concise synthetic recap.",
+            MemoryKind::Preference,
+            "Prefers a concise synthetic recap",
+            "concise synthetic recap",
+        );
+        let original = vault
+            .pending_embedding_sources("synthetic-embed", 1)
+            .expect("pending original")
+            .pop()
+            .expect("original source");
+        assert!(vault
+            .embedding_source_is_pending("synthetic-embed", &original)
+            .expect("original eligibility"));
+
+        vault
+            .store_memory_embedding(
+                &memory.id,
+                memory.revision,
+                &QueryEmbedding {
+                    model: "synthetic-embed".into(),
+                    vector: vec![0.5, 0.5],
+                },
+            )
+            .expect("store embedding");
+        assert!(!vault
+            .embedding_source_is_pending("synthetic-embed", &original)
+            .expect("embedded eligibility"));
+
+        let corrected = vault
+            .edit_memory(
+                &memory.id,
+                "Prefers a detailed synthetic recap",
+                memory.revision,
+            )
+            .expect("correct memory");
+        let corrected_source = vault
+            .pending_embedding_sources("synthetic-embed", 1)
+            .expect("pending correction")
+            .pop()
+            .expect("corrected source");
+        assert!(!vault
+            .embedding_source_is_pending("synthetic-embed", &original)
+            .expect("stale source eligibility"));
+        assert!(vault
+            .embedding_source_is_pending("synthetic-embed", &corrected_source)
+            .expect("corrected eligibility"));
+
+        vault
+            .delete_memory(&corrected.id, corrected.revision)
+            .expect("forget memory");
+        assert!(!vault
+            .embedding_source_is_pending("synthetic-embed", &corrected_source)
+            .expect("forgotten eligibility"));
+    }
+
+    #[test]
+    #[ignore = "manual pending-embedding query benchmark; run with --ignored --nocapture"]
+    fn pending_embedding_point_check_benchmark() {
+        const BATCH: usize = 256;
+        const ROUNDS: usize = 3;
+
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let (source, assistant) = finish_synthetic_turn(
+            &mut vault,
+            &session.id,
+            "Synthetic pending embedding benchmark source.",
+        );
+        let timestamp = now_rfc3339();
+        let transaction = vault.connection.transaction().expect("transaction");
+        for index in 0..BATCH {
+            transaction
+                .execute(
+                    "INSERT INTO memory_records
+                     (id, session_id, source_message_id, assistant_message_id,
+                      kind, content, evidence_quote, evidence_state, revision,
+                      edited, deleted, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 'preference', ?5, ?6,
+                             'user_reported', 1, 0, 0, ?7, ?7)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        session.id,
+                        source.id,
+                        assistant.id,
+                        format!("Synthetic pending embedding record {index}"),
+                        "Synthetic pending embedding benchmark source",
+                        timestamp,
+                    ],
+                )
+                .expect("insert benchmark memory");
+        }
+        transaction.commit().expect("commit benchmark records");
+        let sources = vault
+            .pending_embedding_sources("synthetic-embed", BATCH)
+            .expect("pending benchmark sources");
+        assert_eq!(sources.len(), BATCH);
+
+        let batch_scan_started = Instant::now();
+        let mut batch_scan_matches = 0;
+        for _ in 0..ROUNDS {
+            for source in &sources {
+                batch_scan_matches += usize::from(
+                    vault
+                        .pending_embedding_sources("synthetic-embed", BATCH)
+                        .expect("repeat pending batch")
+                        .into_iter()
+                        .any(|candidate| candidate == *source),
+                );
+            }
+        }
+        let batch_scan_elapsed = batch_scan_started.elapsed();
+
+        let point_check_started = Instant::now();
+        let mut point_check_matches = 0;
+        for _ in 0..ROUNDS {
+            for source in &sources {
+                point_check_matches += usize::from(
+                    vault
+                        .embedding_source_is_pending("synthetic-embed", source)
+                        .expect("point pending check"),
+                );
+            }
+        }
+        let point_check_elapsed = point_check_started.elapsed();
+
+        assert_eq!(batch_scan_matches, BATCH * ROUNDS);
+        assert_eq!(point_check_matches, BATCH * ROUNDS);
+        eprintln!(
+            "pending_embedding_benchmark sources={BATCH} rounds={ROUNDS} batch_scan_us={} point_check_us={}",
+            batch_scan_elapsed.as_micros(),
+            point_check_elapsed.as_micros(),
+        );
     }
 
     #[test]

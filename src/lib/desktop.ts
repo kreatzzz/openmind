@@ -43,7 +43,10 @@ export interface ProviderHealth {
   status: "ready" | "unavailable" | "authRequired" | "misconfigured";
   destination: "local" | "remote";
   model: string;
-  capabilities: { streaming: boolean; structuredNotes: boolean };
+  capabilities: {
+    streaming: boolean | null;
+    structuredNotes: boolean | null;
+  };
   message?: string;
 }
 export interface NoteJob {

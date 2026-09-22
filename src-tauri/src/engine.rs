@@ -299,6 +299,9 @@ impl Engine {
         // A renderer reload is a privacy boundary. Clear every transient
         // conversation, including completed or otherwise idle sessions.
         state.private_sessions.clear();
+        if let Some(work) = state.memory_work.take() {
+            work.cancel.cancel();
+        }
         if let Some(active) = state.active.take() {
             active.cancel.cancel();
             if !active.private {
@@ -1248,10 +1251,8 @@ impl Engine {
                     .vault
                     .as_ref()
                     .ok_or("The vault was locked during memory search rebuild.")?
-                    .pending_embedding_sources(model, MAX_BATCH)
+                    .embedding_source_is_pending(model, &source)
                     .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .any(|candidate| candidate == source)
             };
             if !current {
                 continue;
@@ -1343,6 +1344,36 @@ impl Engine {
                 .map_err(|error| error.to_string())?;
             (state.vault_epoch, configuration, sources)
         };
+        if sources.is_empty() {
+            let state = self.state()?;
+            if state.vault_epoch != vault_epoch
+                || cancel.is_cancelled()
+                || !state
+                    .memory_work
+                    .as_ref()
+                    .is_some_and(|work| work.id == work_id)
+            {
+                return Err("Memory search maintenance was stopped.".into());
+            }
+            if state.active.is_some() || state.notes_active.is_some() {
+                return Err("Memory search maintenance was interrupted by active work.".into());
+            }
+            let vault = state
+                .vault
+                .as_ref()
+                .ok_or("The vault was locked during memory search maintenance.")?;
+            if vault
+                .memory_embedding_configuration()
+                .map_err(|error| error.to_string())?
+                .as_ref()
+                != Some(&configuration)
+            {
+                return Err("Memory search configuration changed during maintenance.".into());
+            }
+            return vault
+                .memory_index_status()
+                .map_err(|error| error.to_string());
+        }
         verify_local_ollama_model_with_cancel(
             &configuration.base_url,
             &configuration.model,
@@ -1378,10 +1409,8 @@ impl Engine {
                     return Err("Memory search configuration changed during maintenance.".into());
                 }
                 vault
-                    .pending_embedding_sources(&configuration.model, MAX_BATCH)
+                    .embedding_source_is_pending(&configuration.model, &source)
                     .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .any(|candidate| candidate == source)
             };
             if !current {
                 continue;
@@ -2013,6 +2042,7 @@ fn recent_context(messages: Vec<Message>, budget: usize) -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retrieval::MemoryIndexState;
 
     const PASSPHRASE: &str = "a synthetic vault passphrase";
 
@@ -2209,6 +2239,36 @@ mod tests {
             .await
             .expect("lexical fallback");
         assert!(memory.context.contains("Take a synthetic walk"));
+    }
+
+    #[tokio::test]
+    async fn idle_embedding_maintenance_does_not_contact_the_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        {
+            let mut state = engine.state().unwrap();
+            state
+                .vault
+                .as_mut()
+                .unwrap()
+                .activate_memory_embedding_configuration(
+                    "http://127.0.0.1:1",
+                    "synthetic-unavailable-model",
+                )
+                .unwrap();
+        }
+
+        let status = engine
+            .update_configured_memory_embeddings(&CancellationToken::new())
+            .await
+            .expect("empty maintenance should not need the provider");
+
+        assert_eq!(status.state, MemoryIndexState::Ready);
+        assert_eq!(
+            status.active_embedding.unwrap().model,
+            "synthetic-unavailable-model"
+        );
     }
 
     #[test]
@@ -2974,6 +3034,25 @@ mod tests {
             MessageStatus::Interrupted
         );
         assert!(engine.prepare_turn(&session.id, "After reload").is_ok());
+    }
+
+    #[test]
+    fn renderer_reconnect_cancels_memory_work_and_allows_next_job() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let stalled = CancellationToken::new();
+        engine.begin_memory_work(&stalled).unwrap();
+
+        assert!(engine.reconnect_renderer().unwrap().unlocked);
+        assert!(stalled.is_cancelled());
+
+        let next = CancellationToken::new();
+        let next_id = engine
+            .begin_memory_work(&next)
+            .expect("renderer reload should release memory work ownership");
+        engine.finish_memory_work(&next_id);
+        assert!(!next.is_cancelled());
     }
 
     #[test]

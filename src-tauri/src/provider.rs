@@ -146,6 +146,8 @@ pub enum ProviderError {
     InvalidUtf8,
     #[error("provider stream ended before done=true")]
     TruncatedStream,
+    #[error("provider stopped before completing the response")]
+    IncompleteResponse,
     #[error("provider stream violated its protocol")]
     Protocol,
     #[error("provider reported an error")]
@@ -269,6 +271,36 @@ pub async fn list_models(base_url: &str) -> Result<Vec<ModelInfo>, ProviderError
     parse_model_list(&body)
 }
 
+/// Check that the configured local model exists and, when exposed by Ollama,
+/// explicitly supports text completion. Older Ollama versions omit the
+/// capability list, which remains unknown rather than being guessed.
+pub async fn health(
+    base_url: &str,
+    model: &str,
+    cancel: CancellationToken,
+) -> Result<Option<bool>, ProviderError> {
+    let endpoint = Endpoint::parse(base_url)?;
+    validate_model_name(model)?;
+    if is_known_cloud_model(model) {
+        return Err(ProviderError::CloudModelRejected);
+    }
+    let client = build_client()?;
+    let request = client
+        .get(endpoint.api("/api/tags"))
+        .build()
+        .map_err(|_| ProviderError::Network)?;
+    let response = execute_with_cancel(&client, request, &cancel).await?;
+    ensure_success(&response)?;
+    let body = read_response_body(response, MAX_TAGS_BODY_BYTES, Some(&cancel)).await?;
+    if !parse_model_list(&body)?
+        .iter()
+        .any(|available| available.name == model)
+    {
+        return Err(ProviderError::InvalidModel);
+    }
+    probe_model_metadata(&client, &endpoint, model, &cancel).await
+}
+
 /// Extract bounded internal-memory and user-note candidates from one current
 /// user message.
 ///
@@ -302,7 +334,7 @@ pub async fn extract_notes(
     }
 
     let client = build_client()?;
-    probe_model_metadata(&client, &endpoint, model, &cancel).await?;
+    let _ = probe_model_metadata(&client, &endpoint, model, &cancel).await?;
 
     let messages = [
         ChatMessage {
@@ -617,6 +649,13 @@ fn validate_model_name(model: &str) -> Result<(), ProviderError> {
     Ok(())
 }
 
+pub(crate) fn validate_chat_completion_reason(reason: Option<&str>) -> Result<(), ProviderError> {
+    match reason {
+        None | Some("stop") => Ok(()),
+        Some(_) => Err(ProviderError::IncompleteResponse),
+    }
+}
+
 fn is_known_cloud_model(model: &str) -> bool {
     model
         .split(|character: char| !character.is_ascii_alphanumeric())
@@ -775,7 +814,7 @@ async fn probe_model_metadata(
     endpoint: &Endpoint,
     model: &str,
     cancel: &CancellationToken,
-) -> Result<(), ProviderError> {
+) -> Result<Option<bool>, ProviderError> {
     let payload = serde_json::json!({ "model": model });
     let encoded = serde_json::to_vec(&payload).map_err(|_| ProviderError::MalformedResponse)?;
     let request = client
@@ -788,7 +827,7 @@ async fn probe_model_metadata(
     if response.status() == StatusCode::NOT_FOUND
         || response.status() == StatusCode::METHOD_NOT_ALLOWED
     {
-        return Ok(());
+        return Ok(None);
     }
     ensure_success(&response)?;
     let body = read_response_body(response, MAX_SHOW_BODY_BYTES, Some(cancel)).await?;
@@ -800,7 +839,28 @@ async fn probe_model_metadata(
     if value.get("error").is_some_and(|error| !error.is_null()) {
         return Err(ProviderError::ProviderReportedError);
     }
-    Ok(())
+    parse_completion_capability(&value)
+}
+
+fn parse_completion_capability(value: &Value) -> Result<Option<bool>, ProviderError> {
+    match value.get("capabilities") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(capabilities)) => {
+            let mut completion = false;
+            for capability in capabilities {
+                let capability = capability
+                    .as_str()
+                    .ok_or(ProviderError::MalformedResponse)?;
+                completion |= capability == "completion";
+            }
+            if completion {
+                Ok(Some(true))
+            } else {
+                Err(ProviderError::InvalidModel)
+            }
+        }
+        Some(_) => Err(ProviderError::MalformedResponse),
+    }
 }
 
 /// Inspect only explicit metadata flags. A missing flag is left unknown. A
@@ -924,6 +984,7 @@ impl NdjsonParser {
             }
         }
         if done {
+            validate_chat_completion_reason(frame.done_reason.as_deref())?;
             self.saw_done = true;
         }
         Ok(())
@@ -933,6 +994,8 @@ impl NdjsonParser {
 #[derive(Debug, Deserialize)]
 struct StreamFrame {
     done: Option<bool>,
+    #[serde(default)]
+    done_reason: Option<String>,
     #[serde(default)]
     message: Option<StreamMessage>,
     #[serde(default)]
@@ -1027,6 +1090,55 @@ mod tests {
             .feed(b"{\"message\":{\"content\":\"partial\"},\"done\":false}\n")
             .expect("partial frame is valid");
         assert_eq!(parser.finish().unwrap_err(), ProviderError::TruncatedStream);
+    }
+
+    #[test]
+    fn parser_accepts_stop_or_legacy_missing_reason_and_rejects_other_terminal_reasons() {
+        for frame in [
+            br#"{"done":true,"done_reason":"stop"}
+"#
+            .as_slice(),
+            br#"{"done":true}
+"#
+            .as_slice(),
+        ] {
+            let mut parser = NdjsonParser::default();
+            parser.feed(frame).expect("complete terminal reason");
+            parser.finish().expect("complete stream");
+        }
+
+        for reason in ["length", "content_filter", "tool_calls", "unexpected"] {
+            let frame = format!("{{\"done\":true,\"done_reason\":\"{reason}\"}}\n");
+            let mut parser = NdjsonParser::default();
+            assert_eq!(
+                parser.feed(frame.as_bytes()),
+                Err(ProviderError::IncompleteResponse)
+            );
+        }
+    }
+
+    #[test]
+    fn model_capabilities_reject_embedding_only_and_preserve_legacy_unknown() {
+        assert_eq!(
+            parse_completion_capability(&serde_json::json!({
+                "capabilities": ["completion", "tools"]
+            })),
+            Ok(Some(true))
+        );
+        assert_eq!(
+            parse_completion_capability(&serde_json::json!({
+                "capabilities": ["embedding"]
+            })),
+            Err(ProviderError::InvalidModel)
+        );
+        assert_eq!(
+            parse_completion_capability(&serde_json::json!({ "legacy": true })),
+            Ok(None)
+        );
+        assert_eq!(
+            parse_completion_capability(&serde_json::json!({ "capabilities": "completion" })),
+            Err(ProviderError::MalformedResponse)
+        );
     }
 
     #[test]
