@@ -150,11 +150,19 @@
   opacity: 1;
 }
 .private-conversation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
   min-height: 36px;
   justify-content: flex-start;
   padding: 0 11px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--muted);
   font-size: 12px;
+  text-align: left;
 }
 .private-conversation:hover {
   color: var(--ink);
@@ -1034,7 +1042,7 @@
 }
 .provider-choices {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin: 16px 0 20px;
 }
@@ -1056,6 +1064,9 @@
 }
 .provider-choices > button:hover:not(:disabled) {
   background: var(--hover);
+}
+.provider-choices > button:disabled {
+  opacity: 0.55;
 }
 .provider-choices > button.is-selected {
   border-color: var(--accent);
@@ -1087,6 +1098,28 @@
   color: var(--muted);
   font-size: 11px;
   line-height: 1.45;
+}
+.provider-availability {
+  margin: -8px 0 20px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.65;
+}
+.provider-settings > .secondary-button {
+  margin-top: 16px;
+}
+.provider-settings > .primary-button {
+  margin-top: 20px;
+}
+.remote-consent {
+  margin-top: 20px;
+  padding: 16px 0 0;
+  border-top: 1px solid var(--line);
+}
+.remote-consent > p {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.65;
 }
 .settings-footer {
   display: flex;

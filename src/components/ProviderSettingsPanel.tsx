@@ -145,10 +145,11 @@ export function ProviderSettingsPanel({
     }
   }
   const remote = settings.provider !== "ollama";
+  const codexAvailable = isDemo && !sample;
   return (
     <div className="settings-section provider-settings">
       <h3>Model connection</h3>
-      <p>Choose where your AI runs. You can change this later.</p>
+      <p>Choose a connection, load a model, then save it.</p>
       <div className="provider-choices">
         <button
           disabled={sample}
@@ -161,35 +162,39 @@ export function ProviderSettingsPanel({
           <small>Local Ollama</small>
         </button>
         <button
-          disabled={sample}
-          className={settings.provider !== "ollama" ? "is-selected" : ""}
-          aria-pressed={settings.provider !== "ollama"}
-          onClick={() =>
-            changeProvider(isDemo && !sample ? "codex" : "openaiCompatible")
-          }
+          disabled={!codexAvailable}
+          className={settings.provider === "codex" ? "is-selected" : ""}
+          aria-pressed={settings.provider === "codex"}
+          aria-describedby={!codexAvailable ? "codex-availability" : undefined}
+          onClick={() => changeProvider("codex")}
         >
           <Globe size={19} />
-          <strong>Online provider</strong>
-          <small>Connect your account or API</small>
+          <strong>ChatGPT</strong>
+          <small>
+            {codexAvailable
+              ? "Use your Codex sign-in"
+              : "Example workspace only"}
+          </small>
+        </button>
+        <button
+          disabled={sample}
+          className={
+            settings.provider === "openaiCompatible" ? "is-selected" : ""
+          }
+          aria-pressed={settings.provider === "openaiCompatible"}
+          onClick={() => changeProvider("openaiCompatible")}
+        >
+          <Globe size={19} />
+          <strong>Compatible API</strong>
+          <small>Endpoint and API key</small>
         </button>
       </div>
-      {remote && (
-        <>
-          <label htmlFor="online-provider">Provider</label>
-          <select
-            id="online-provider"
-            value={settings.provider}
-            disabled={busy}
-            onChange={(event) =>
-              changeProvider(event.target.value as ProviderKind)
-            }
-          >
-            {isDemo && !sample && (
-              <option value="codex">ChatGPT via Codex</option>
-            )}
-            <option value="openaiCompatible">OpenAI-compatible API</option>
-          </select>
-        </>
+      {!codexAvailable && !sample && (
+        <p id="codex-availability" className="provider-availability">
+          ChatGPT through your Codex subscription is currently available in the
+          example workspace. Lock this vault, then choose Explore with example
+          conversations to test it.
+        </p>
       )}
       {settings.provider === "codex" ? (
         <p className="field-hint">
@@ -266,7 +271,11 @@ export function ProviderSettingsPanel({
           disabled={sample || busy || !loaded}
         >
           <RefreshCw size={15} />
-          {busy ? "Checking…" : "Find available models"}
+          {busy
+            ? "Checking…"
+            : settings.provider === "codex"
+              ? "Load ChatGPT models"
+              : "Scan installed models"}
         </button>
       )}
       <label htmlFor="provider-model">Model</label>
@@ -296,7 +305,9 @@ export function ProviderSettingsPanel({
           placeholder={
             settings.provider === "ollama"
               ? "Choose an installed model"
-              : "Model ID"
+              : settings.provider === "codex"
+                ? "Load models from Codex"
+                : "Model ID"
           }
           spellCheck={false}
           disabled={sample || busy}

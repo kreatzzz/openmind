@@ -62,7 +62,7 @@ async function expectBackground(locator, color) {
 
 async function expectProviderChoicesToFit(dialog) {
   const choices = dialog.locator(".provider-choices > button");
-  await expect(choices).toHaveCount(2);
+  await expect(choices).toHaveCount(3);
   await expect.poll(() => choices.evaluateAll((buttons) => buttons.every((button) => {
     const bounds = button.getBoundingClientRect();
     const icon = button.querySelector("svg")?.getBoundingClientRect();
