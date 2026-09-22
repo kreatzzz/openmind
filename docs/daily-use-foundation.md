@@ -8,7 +8,7 @@ Provider endpoint, model, consent, and reading preferences live in the encrypted
 
 Connection checks establish reachability and configuration, not the quality of a model or its reliability at producing valid notes. Malformed structured output cannot change saved notes. Background notes jobs persist permission and provider snapshots, retry at most three times with backoff, and yield to a new reply. A completed reply stays saved if its notes request fails. Changing remote configuration or credentials revokes outstanding remote job consent rather than sending a new credential to an old destination.
 
-The ChatGPT subscription bridge remains limited to the native example workspace. It uses official Codex sign-in, has no API-billing fallback, and still needs a live generation test. It is not a general production ChatGPT subscription integration.
+The ChatGPT subscription bridge is available in native personal and example workspaces. It uses official Codex sign-in, has no API-billing fallback, and requires explicit remote-processing consent. Synthetic live generation has passed on Windows; native UI and macOS runtime verification remain before release qualification.
 
 ## Relevant memory
 

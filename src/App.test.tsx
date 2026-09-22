@@ -58,6 +58,12 @@ vi.mock("./lib/desktop", () => ({
   },
 }));
 
+vi.mock("thinking-orbs", () => ({
+  ThinkingOrb: ({ state }: { state: string }) => (
+    <span data-testid="thinking-orb" data-state={state} />
+  ),
+}));
+
 const session: Session = {
   id: "synthetic-session",
   title: "Monday conversation",
@@ -302,6 +308,11 @@ describe("native conversation lifecycle", () => {
     });
     await openConnectedApp();
     submit("A synthetic thought.");
+    expect(screen.getByRole("status")).toHaveTextContent("Preparing a reply");
+    expect(screen.getAllByTestId("thinking-orb")[0]).toHaveAttribute(
+      "data-state",
+      "working",
+    );
     act(() =>
       emit?.({ type: "finished", messageId: "reply", status: "complete" }),
     );
@@ -1110,13 +1121,8 @@ describe("remembered context workspace", () => {
   });
 });
 
-describe("ChatGPT demo consent", () => {
+describe("ChatGPT subscription consent", () => {
   async function chooseCodex() {
-    vi.mocked(desktop.getVaultStatus).mockResolvedValue({
-      exists: true,
-      unlocked: true,
-      isDemo: true,
-    });
     vi.mocked(desktop.listCodexModels).mockResolvedValue([
       { name: "synthetic-codex-model", size: 0 },
     ]);
@@ -1133,7 +1139,7 @@ describe("ChatGPT demo consent", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Model connection" }));
-    fireEvent.click(screen.getByRole("button", { name: /Online provider/ }));
+    fireEvent.click(screen.getByRole("button", { name: /ChatGPT/ }));
   }
   it("requires explicit consent for messages and note updates", async () => {
     await chooseCodex();
@@ -1142,7 +1148,7 @@ describe("ChatGPT demo consent", () => {
     });
     expect(consent).not.toBeChecked();
     fireEvent.click(
-      screen.getByRole("button", { name: "Find available models" }),
+      screen.getByRole("button", { name: "Load ChatGPT models" }),
     );
     await screen.findByDisplayValue("synthetic-codex-model");
     expect(
@@ -1187,7 +1193,7 @@ describe("ChatGPT demo consent", () => {
       }),
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Find available models" }),
+      screen.getByRole("button", { name: "Load ChatGPT models" }),
     );
     fireEvent.click(screen.getByRole("button", { name: /On this device/ }));
     await act(async () => {
@@ -1197,18 +1203,17 @@ describe("ChatGPT demo consent", () => {
     expect(
       screen.queryByRole("combobox", { name: "Model" }),
     ).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Online provider/ }));
+    fireEvent.click(screen.getByRole("button", { name: /ChatGPT/ }));
     expect(
       screen.getByRole("checkbox", {
         name: "I agree to send this data to this provider.",
       }),
     ).not.toBeChecked();
   });
-  it("keeps personal vaults on Ollama", async () => {
+  it("offers ChatGPT in a personal vault", async () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-    expect(
-      screen.queryByRole("option", { name: "ChatGPT via Codex" }),
-    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Model connection" }));
+    expect(screen.getByRole("button", { name: /ChatGPT/ })).toBeEnabled();
   });
 });

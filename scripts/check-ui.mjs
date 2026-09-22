@@ -60,6 +60,23 @@ async function expectBackground(locator, color) {
   })).toBe(color);
 }
 
+async function expectProviderChoicesToFit(dialog) {
+  const choices = dialog.locator(".provider-choices > button");
+  await expect(choices).toHaveCount(3);
+  await expect.poll(() => choices.evaluateAll((buttons) => buttons.every((button) => {
+    const bounds = button.getBoundingClientRect();
+    const icon = button.querySelector("svg")?.getBoundingClientRect();
+    const title = button.querySelector("strong")?.getBoundingClientRect();
+    const detail = button.querySelector("small")?.getBoundingClientRect();
+    if (!icon || !title || !detail) return false;
+    return icon.right < title.left &&
+      title.top < detail.top &&
+      title.right <= bounds.right + 1 &&
+      detail.right <= bounds.right + 1 &&
+      detail.bottom <= bounds.bottom + 1;
+  }))).toBe(true);
+}
+
 async function navigate(name) {
   const mobile = page.getByRole("button", { name: "Open navigation", exact: true });
   if (await mobile.isVisible()) {
@@ -77,6 +94,12 @@ try {
   await page.getByRole("button", { name: "Explore the workspace", exact: true }).click();
   await expect(page.getByRole("heading", { name: /^Good (morning|afternoon|evening)\.$/ })).toBeVisible();
   await capture("overview-light");
+
+  await page.getByRole("complementary", { name: "Workspace navigation" }).getByRole("button", { name: /Making room for a slower week/ }).click();
+  const transcript = page.getByRole("region", { name: "Conversation transcript" });
+  await expect(transcript).toBeVisible();
+  await expect(transcript.getByRole("article")).toHaveCount(4);
+  await capture("conversation-light");
 
   await navigate("Your notes");
   await page.getByRole("button", { name: "Edit note", exact: true }).first().click();
@@ -101,6 +124,9 @@ try {
   await settings.getByRole("button", { name: "Blue", exact: true }).click();
   await expect(settings.getByRole("button", { name: "Blue", exact: true })).toHaveAttribute("aria-pressed", "true");
   await capture("settings-dark");
+  await settings.getByRole("button", { name: "Model connection", exact: true }).click();
+  await expectProviderChoicesToFit(settings);
+  await capture("settings-model-connection-dark");
   await page.keyboard.press("Escape");
   await expect(settings).not.toBeVisible();
   await expect(page.getByRole("complementary").getByRole("button", { name: "Settings", exact: true })).toBeFocused();
@@ -110,11 +136,13 @@ try {
     await page.setViewportSize({ width, height: 844 });
     await capture(`memory-${width}`);
     await navigate("Settings");
+    await expectProviderChoicesToFit(settings);
     await capture(`settings-${width}`);
     await page.keyboard.press("Escape");
   }
   await page.setViewportSize({ width: 1280, height: 900 });
   await navigate("Settings");
+  await settings.getByRole("button", { name: "Appearance", exact: true }).click();
   await settings.getByRole("button", { name: "System", exact: true }).click();
   await page.emulateMedia({ colorScheme: "dark" });
   await expect(page.locator(".workspace")).toHaveCSS("background-color", "rgb(0, 0, 0)");
@@ -127,7 +155,7 @@ try {
   await navigate("Settings");
   await capture("settings-200-percent-layout");
   expect(errors).toEqual([]);
-  console.log("Browser checks passed: onboarding, notebook edit, memory search/forget confirmation, theme colors, focus return, narrow layouts, and a 200%-zoom-equivalent viewport. Actual native zoom, accessibility, and model behavior are separate checks.");
+  console.log("Browser checks passed: onboarding, conversation transcript, notebook edit, memory search/forget confirmation, theme colors, focus return, narrow layouts, and a 200%-zoom-equivalent viewport. Actual native zoom, accessibility, dictation, and model behavior are separate checks.");
 } catch (error) {
   await page.screenshot({ path: path.join(output, "failure.png"), fullPage: true }).catch(() => {});
   throw error;

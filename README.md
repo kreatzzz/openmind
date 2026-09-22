@@ -10,7 +10,7 @@ Openmind is intended to connect life events, people, recurring concerns, and goa
 
 The intended product is a clinical therapy app. Target conditions, clinical delivery model, launch jurisdiction, and evidence requirements still need definition. No clinical effectiveness or therapist-equivalence claim has been established.
 
-Each submitted message should lead to a streamed text reply, an update to encrypted internal memory, and an update to separate user-facing notes. The proposed launch input is typing plus local speech-to-text, pending clarification. Text-to-speech output, with a provider such as ElevenLabs, comes later.
+Each submitted message should lead to a streamed text reply, an update to encrypted internal memory, and an update to separate user-facing notes. Input supports typing and a fail-closed local dictation path when the desktop runtime can prove on-device recognition. A consistent native speech engine is still release work. Text-to-speech output, with a provider such as ElevenLabs, comes later.
 
 ## Run the app
 
@@ -19,7 +19,7 @@ bun install --frozen-lockfile
 bun run tauri dev
 ```
 
-On Windows, first run `. ./scripts/windows-env.ps1` in the same PowerShell terminal. Create a workspace, protect it with a passphrase, then connect an installed Ollama model in Settings. The optional example workspace contains fictional conversations and stays separate from the personal vault.
+On Windows, first run `. ./scripts/windows-env.ps1` in the same PowerShell terminal. Create a workspace, protect it with a passphrase, then connect Ollama, a ChatGPT subscription through Codex, or a compatible API in Settings. The optional example workspace contains fictional conversations and stays separate from the personal vault.
 
 `bun run dev` opens the browser interface at `http://127.0.0.1:1420`. The browser can exercise layout, themes, notes, and context controls with example data; encrypted storage and model connections require the desktop app. See [Linux launch troubleshooting](docs/prototype.md#linux-startup-troubleshooting) if the desktop window fails to open.
 

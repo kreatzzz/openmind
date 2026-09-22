@@ -744,11 +744,11 @@ async fn list_models(
 
 #[tauri::command]
 async fn list_codex_models(state: State<'_, DesktopState>) -> Result<Vec<ModelInfo>, String> {
-    state.0.require_demo()?;
+    state.0.require_unlocked()?;
     let models = codex::list_models()
         .await
         .map_err(|error| error.to_string())?;
-    state.0.require_demo()?;
+    state.0.require_unlocked()?;
     Ok(models)
 }
 

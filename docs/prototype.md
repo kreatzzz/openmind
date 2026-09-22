@@ -43,11 +43,11 @@ Turning a switch off also revokes that output for outstanding updates in the con
 
 ## Subscription bridge checkpoint
 
-An experimental ChatGPT subscription adapter using Codex App Server is checked in for the native demo, with explicit remote consent enforced in Rust. CLI sign-in and model discovery were probed; live adapter generation and native integration still need verification. See [the checkpoint and next steps](codex-testing.md).
+An experimental ChatGPT subscription adapter using Codex App Server is available in native personal and example workspaces, with explicit remote consent enforced in Rust. CLI sign-in, model discovery, live generation, and structured notes have passed synthetic Windows tests; native UI and macOS runtime verification remain. See [the checkpoint and next steps](codex-testing.md).
 
 ## Not implemented
 
-Entity reconciliation and explicit relationships between memory nodes, topic-wide forgetting, summaries, transcript editing, speech input/output, keychain convenience unlock, and signed updates are future work. Windows session-lock/disconnect and suspend notifications are integrated. macOS observes documented session-resign, system-sleep, and screen-sleep notifications, which do not cover a normal awake screen lock. Native verification on both supported platforms and a supported macOS awake-lock signal remain release work.
+Entity reconciliation and explicit relationships between memory nodes, topic-wide forgetting, summaries, transcript editing, text-to-speech output, keychain convenience unlock, and signed updates are future work. Speech-to-text now has a fail-closed local capability path and editable composer flow; a consistent native Windows/macOS engine and its release validation remain future work. Windows session-lock/disconnect and suspend notifications are integrated. macOS observes documented session-resign, system-sleep, and screen-sleep notifications, which do not cover a normal awake screen lock. Native verification on both supported platforms and a supported macOS awake-lock signal remain release work.
 
 The current extraction reads only the user message for its turn. It does not derive commitments from the assistant response, merge older entities, or process interrupted replies. A new reply cancels and defers active notes work; a bounded background queue resumes eligible jobs. This is the first implementation of the two-call design, not the complete job scheduling and graph specification. Deleting a notebook entry does not remove its source or internal memory; delete the conversation to remove all of those records from the active vault. Existing backups are outside that deletion.
 

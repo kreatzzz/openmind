@@ -63,7 +63,7 @@ The implementation should follow [Tauri's security guidance](https://v2.tauri.ap
 
 ## Speech and user-note boundaries
 
-Local dictation is the proposed launch input. Start recording only on user action and stop on cancel, timeout, lock, or device loss. Keep raw audio transient, bound its size, and disable content logging and plaintext temporary audio files. Only a user-submitted transcription becomes durable conversation evidence. OS dictation is not presumed offline; an explicit local speech adapter is the default proposal.
+Local dictation is an input path. Start recording only on user action and stop on cancel, timeout, lock, or device loss. Keep raw audio transient, bound its size, and disable content logging and plaintext temporary audio files. Only a user-submitted transcription becomes durable conversation evidence. OS dictation is not presumed offline: the current frontend path accepts only a runtime that proves `processLocally` support and otherwise remains unavailable. A native in-process adapter is still required for consistent Windows and macOS support.
 
 Future ElevenLabs output sends response text to a remote speech processor even when the chat model is local. Consent is separate from model-provider consent. Send only text approved for display, never the internal graph or whole notebook. Check provider retention and account terms at integration time; do not promise zero retention by default. See [speech data flow](turn-processing.md#text-to-speech-later).
 
