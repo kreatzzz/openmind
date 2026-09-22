@@ -420,7 +420,9 @@ describe("native conversation lifecycle", () => {
       },
     );
     render(<App />);
-    await screen.findByRole("heading", { name: "Good morning." });
+    await screen.findByRole("heading", {
+      name: /^Good (morning|afternoon|evening)\.$/,
+    });
     act(() =>
       notify?.([
         {
@@ -722,7 +724,9 @@ describe("demo and notebook", () => {
         name: "Explore with example conversations",
       }),
     );
-    await screen.findByRole("heading", { name: "Good morning." });
+    await screen.findByRole("heading", {
+      name: /^Good (morning|afternoon|evening)\.$/,
+    });
     expect(desktop.openDemo).toHaveBeenCalledWith("demo", "openmind-demo-2026");
     expect(desktop.createVault).not.toHaveBeenCalled();
   });

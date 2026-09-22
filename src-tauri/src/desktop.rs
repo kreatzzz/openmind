@@ -4,6 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use std::sync::Mutex;
+
 use tauri::{ipc::Channel, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 use zeroize::Zeroizing;
@@ -26,7 +29,24 @@ use crate::{
     retrieval::{EmbeddingConfiguration, MemoryIndexStatus},
 };
 
+#[cfg(windows)]
+use crate::platform_lock::LockMonitor;
+#[cfg(any(windows, target_os = "macos"))]
+use crate::platform_lock::{LockCallback, LockEvent};
+
 struct DesktopState(Arc<Engine>);
+
+#[cfg(windows)]
+struct NativeLockMonitor {
+    monitor: Mutex<Option<LockMonitor>>,
+}
+
+fn lock_for_native_event(engine: &Engine) -> bool {
+    if !engine.status().is_ok_and(|status| status.unlocked) {
+        return false;
+    }
+    engine.lock().is_ok()
+}
 
 #[tauri::command]
 async fn list_plans(
@@ -939,6 +959,28 @@ pub fn run() {
         .setup(|app| {
             let directory = app.path().app_data_dir()?.join("vault");
             let engine = Arc::new(Engine::new(directory));
+            #[cfg(any(windows, target_os = "macos"))]
+            {
+                let native_engine = Arc::downgrade(&engine);
+                let native_handle = app.handle().clone();
+                let callback: LockCallback = Arc::new(move |_event: LockEvent| {
+                    if let Some(engine) = native_engine.upgrade() {
+                        if lock_for_native_event(&engine) {
+                            let _ = native_handle.emit("vault-locked", ());
+                        }
+                    }
+                });
+                #[cfg(windows)]
+                {
+                    let monitor = LockMonitor::start(callback).map_err(std::io::Error::other)?;
+                    app.manage(NativeLockMonitor {
+                        monitor: Mutex::new(Some(monitor)),
+                    });
+                }
+                #[cfg(target_os = "macos")]
+                crate::platform_lock::install_macos_monitor(callback)
+                    .map_err(std::io::Error::other)?;
+            }
             let monitor = Arc::downgrade(&engine);
             let app_handle = app.handle().clone();
             std::thread::spawn(move || loop {
@@ -1033,6 +1075,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Could not build the Openmind desktop application")
         .run(|app, event| {
+            #[cfg(windows)]
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Ok(mut monitor) = app.state::<NativeLockMonitor>().monitor.lock() {
+                    monitor.take();
+                }
+            }
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Exit) {
+                crate::platform_lock::stop_macos_monitor();
+            }
             if matches!(event, tauri::RunEvent::Resumed) {
                 let engine = &app.state::<DesktopState>().0;
                 if engine.status().is_ok_and(|status| status.unlocked) {
@@ -1041,4 +1093,31 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PASSPHRASE: &str = "synthetic native lifecycle passphrase";
+
+    #[test]
+    fn native_security_event_locks_and_clears_private_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path().join("vault"));
+        engine.unlock(PASSPHRASE, true).unwrap();
+        let private = engine.create_private_session().unwrap();
+        let turn = engine
+            .prepare_turn(&private.id, "Synthetic transient input.")
+            .unwrap();
+
+        assert!(lock_for_native_event(&engine));
+        assert!(turn.cancel.is_cancelled());
+        assert!(!engine.status().unwrap().unlocked);
+
+        engine.unlock(PASSPHRASE, false).unwrap();
+        assert!(engine.list_messages(&private.id).is_err());
+        assert!(lock_for_native_event(&engine));
+        assert!(!lock_for_native_event(&engine));
+    }
 }

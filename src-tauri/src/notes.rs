@@ -282,7 +282,7 @@ fn validate_candidate_shape(
     if content.chars().count() > MAX_CANDIDATE_CONTENT_CHARS {
         return Err(NotePatchValidationError::ContentTooLong);
     }
-    if evidence_quote.is_empty() {
+    if evidence_quote.trim().is_empty() {
         return Err(NotePatchValidationError::EmptyEvidenceQuote);
     }
     if evidence_quote.chars().count() > MAX_EVIDENCE_QUOTE_CHARS {
@@ -302,7 +302,7 @@ fn validate_candidate(
     if content.chars().count() > MAX_CANDIDATE_CONTENT_CHARS {
         return Err(NotePatchValidationError::ContentTooLong);
     }
-    if evidence_quote.is_empty() {
+    if evidence_quote.trim().is_empty() {
         return Err(NotePatchValidationError::EmptyEvidenceQuote);
     }
     if evidence_quote.chars().count() > MAX_EVIDENCE_QUOTE_CHARS {

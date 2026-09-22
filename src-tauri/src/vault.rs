@@ -2476,6 +2476,8 @@ fn memory_context_line(
     content: &str,
     evidence_quote: &str,
 ) -> String {
+    let content = context_data(content);
+    let evidence_quote = context_data(evidence_quote);
     match evidence_state {
         MemoryEvidenceState::UserReported => format!(
             "[user-reported] {}: {} (evidence: \"{}\")\n",
@@ -2499,7 +2501,18 @@ fn memory_context_line(
 }
 
 fn one_line(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
+    context_data(&value.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Saved memory is placed inside an XML-like data boundary by the desktop
+/// dispatch layer. Escape boundary characters so a quoted source cannot close
+/// that wrapper. This preserves the text as untrusted data; it does not make a
+/// model immune to instructions contained in the data.
+fn context_data(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn default_memory_view(kind: MemoryKind) -> &'static str {

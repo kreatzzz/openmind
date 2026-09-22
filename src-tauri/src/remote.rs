@@ -289,10 +289,7 @@ pub async fn extract_notes(
     )
     .await?;
     status(&response)?;
-    let bytes = response.bytes().await.map_err(|_| ProviderError::Network)?;
-    if bytes.len() > MAX_BODY_BYTES {
-        return Err(ProviderError::ResponseTooLarge);
-    }
+    let bytes = provider::read_response_body(response, MAX_BODY_BYTES, Some(&cancel)).await?;
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| ProviderError::MalformedResponse)?;
     let content = value
@@ -313,8 +310,34 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
+        sync::oneshot,
     };
+
+    async fn drain_http_request(socket: &mut TcpStream) {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4 * 1024];
+        loop {
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert!(count > 0, "request ended before its declared body");
+            request.extend_from_slice(&buffer[..count]);
+            let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                return;
+            }
+        }
+    }
 
     async fn mock_response(
         body: &'static str,
@@ -428,6 +451,66 @@ mod tests {
         let request = request.await.unwrap();
         assert!(request.contains("\\\"strict\\\":true") || request.contains("\"strict\":true"));
         assert!(request.contains("json_schema"));
+    }
+
+    #[tokio::test]
+    async fn compatible_notes_body_is_bounded_and_cancellable_after_headers() {
+        let oversized_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let oversized_address = oversized_listener.local_addr().unwrap();
+        let oversized_task = tokio::spawn(async move {
+            let (mut socket, _) = oversized_listener.accept().await.unwrap();
+            drain_http_request(&mut socket).await;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                MAX_BODY_BYTES + 1
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let oversized = extract_notes(
+            &format!("http://{oversized_address}/v1"),
+            "synthetic-model",
+            Zeroizing::new("synthetic-key".into()),
+            "Synthetic source.",
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(oversized, Err(ProviderError::ResponseTooLarge));
+        oversized_task.abort();
+
+        let delayed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let delayed_address = delayed_listener.local_addr().unwrap();
+        let (headers_sent, headers_received) = oneshot::channel();
+        let delayed_task = tokio::spawn(async move {
+            let (mut socket, _) = delayed_listener.accept().await.unwrap();
+            drain_http_request(&mut socket).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 128\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            headers_sent.send(()).unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let cancel = CancellationToken::new();
+        let request_cancel = cancel.clone();
+        let url = format!("http://{delayed_address}/v1");
+        let extraction = tokio::spawn(async move {
+            extract_notes(
+                &url,
+                "synthetic-model",
+                Zeroizing::new("synthetic-key".into()),
+                "Synthetic source.",
+                request_cancel,
+            )
+            .await
+        });
+        headers_received.await.unwrap();
+        cancel.cancel();
+        let cancelled = extraction.await.unwrap();
+        assert_eq!(cancelled, Err(ProviderError::Cancelled));
+        delayed_task.abort();
     }
 
     #[tokio::test]

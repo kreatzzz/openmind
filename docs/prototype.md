@@ -47,7 +47,7 @@ An experimental ChatGPT subscription adapter using Codex App Server is checked i
 
 ## Not implemented
 
-Entity reconciliation and explicit relationships between memory nodes, topic-wide forgetting, summaries, transcript editing, speech input/output, keychain convenience unlock, direct OS session-lock notifications, and signed updates are future work. Suspend/resume delivery and OS session-lock behavior still require native verification on both supported platforms.
+Entity reconciliation and explicit relationships between memory nodes, topic-wide forgetting, summaries, transcript editing, speech input/output, keychain convenience unlock, and signed updates are future work. Windows session-lock/disconnect and suspend notifications are integrated. macOS observes documented session-resign, system-sleep, and screen-sleep notifications, which do not cover a normal awake screen lock. Native verification on both supported platforms and a supported macOS awake-lock signal remain release work.
 
 The current extraction reads only the user message for its turn. It does not derive commitments from the assistant response, merge older entities, or process interrupted replies. A new reply cancels and defers active notes work; a bounded background queue resumes eligible jobs. This is the first implementation of the two-call design, not the complete job scheduling and graph specification. Deleting a notebook entry does not remove its source or internal memory; delete the conversation to remove all of those records from the active vault. Existing backups are outside that deletion.
 
@@ -100,7 +100,7 @@ For an unsigned local native build without an installer:
 bun run tauri build --no-bundle
 ```
 
-Bundle configuration targets macOS app/DMG and Windows NSIS. Run native builds on the target OS. Signing identities, notarization credentials, installer smoke tests, and release automation are still required before publishing installers. The workflow currently checks compilation and tests on macOS and Windows; it does not publish releases.
+Bundle configuration targets macOS app/DMG and Windows NSIS. Run native builds on the target OS. The [desktop release workflow](desktop-release.md) now smoke-tests unsigned/ad-hoc development bundles and defines a manual, fail-closed signed draft release. Signing identities, notarization credentials, protected environment configuration, and clean-device tests are still required before publishing installers. No updater endpoint or updater signing key is configured.
 
 The vault lives under Tauri's per-user app-data directory for `io.github.kreatzzz.openmind`, in its `vault` subdirectory. Do not commit that directory or include it in issue reports. Examples and tests must contain only synthetic text.
 
