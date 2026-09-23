@@ -132,6 +132,41 @@ describe("useLocalDictation", () => {
     expect(result.current.message).toBe("Microphone disconnected");
   });
 
+  it("starts only one capture when retry is activated twice before startup finishes", async () => {
+    let completeStart:
+      | ((session: { stop: typeof stop; cancel: typeof cancel }) => void)
+      | undefined;
+    vi.mocked(startLocalSpeechRecognition).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          completeStart = resolve;
+        }),
+    );
+    const { result } = renderHook(() =>
+      useLocalDictation({
+        language: "en-US",
+        value: "Draft",
+        onValueChange: vi.fn(),
+        selection: () => ({ start: 5, end: 5 }),
+        sessionKey: "synthetic-session",
+        disabled: false,
+      }),
+    );
+    await waitFor(() => expect(result.current.phase).toBe("ready"));
+    let first: Promise<void> | undefined;
+    let second: Promise<void> | undefined;
+    act(() => {
+      first = result.current.retry();
+      second = result.current.retry();
+    });
+    expect(result.current.phase).toBe("starting");
+    expect(startLocalSpeechRecognition).toHaveBeenCalledOnce();
+    await act(async () => {
+      completeStart?.({ stop, cancel });
+      await Promise.all([first, second]);
+    });
+  });
+
   it("cancels capture when its conversation surface is hidden", async () => {
     const { result, rerender } = renderHook(
       ({ disabled }) =>

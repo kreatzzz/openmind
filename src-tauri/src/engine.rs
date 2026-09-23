@@ -1459,6 +1459,19 @@ impl Engine {
             .map_err(|error| error.to_string())
     }
 
+    pub fn reopen_failed_notes(&self, message_id: &str) -> Result<(), String> {
+        let mut state = self.state()?;
+        if state.active.is_some() || state.notes_active.is_some() {
+            return Err("Stop the current operation before retrying saved updates.".into());
+        }
+        state
+            .vault
+            .as_mut()
+            .ok_or("Unlock your vault first.")?
+            .reopen_failed_notes(message_id)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn edit_memory(
         &self,
         id: &str,

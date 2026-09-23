@@ -364,7 +364,7 @@ async fn execute_notes(
         Ok(Some(status)) => {
             updated_memory = status == NotesStatus::Complete && prepared.input.memory_enabled;
             let message = if status == NotesStatus::Failed {
-                Some(message.unwrap_or_else(|| "Notes update stopped. You can retry it.".into()))
+                Some(message.unwrap_or_else(|| "Notes update stopped. Your reply is saved.".into()))
             } else {
                 None
             };
@@ -407,6 +407,7 @@ async fn retry_notes(
     // Legacy request fields are compatibility assertions only. Persisted job
     // settings remain authoritative and cannot be overridden by the renderer.
     let _ = (provider, base_url, model, remote_consent);
+    state.0.reopen_failed_notes(&message_id)?;
     update_notes(Arc::clone(&state.0), message_id, &connection, &on_event).await
 }
 

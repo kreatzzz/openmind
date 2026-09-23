@@ -151,6 +151,9 @@ export default function App() {
   const [memoryError, setMemoryError] = useState("");
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [noteStatus, setNoteStatus] = useState("");
+  const [failedNotesMessageId, setFailedNotesMessageId] = useState<
+    string | null
+  >(null);
   const [search, setSearch] = useState("");
   const [highlight, setHighlight] = useState<string | null>(null);
   const [appearance, setAppearance] = useState(() => {
@@ -338,6 +341,39 @@ export default function App() {
 
   const sessionMemoryEnabled = session?.memoryEnabled !== false;
   const sessionNotesEnabled = session?.notesEnabled !== false;
+  const lastCompletedReplyId = [...messages]
+    .reverse()
+    .find(
+      (message) =>
+        message.role === "assistant" && message.status === "complete",
+    )?.id;
+
+  useEffect(() => {
+    if (!selected || sample || session?.private || !lastCompletedReplyId) {
+      setFailedNotesMessageId(null);
+      return;
+    }
+    let current = true;
+    void desktop.listNoteJobs().then(
+      (jobs) => {
+        if (!current) return;
+        setFailedNotesMessageId(
+          jobs.some(
+            (job) =>
+              job.messageId === lastCompletedReplyId && job.status === "failed",
+          )
+            ? lastCompletedReplyId
+            : null,
+        );
+      },
+      () => {
+        if (current) setFailedNotesMessageId(null);
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [selected, sample, session?.private, lastCompletedReplyId, noteStatus]);
 
   function derivationLabel(memoryEnabled: boolean, notesEnabled: boolean) {
     if (memoryEnabled && notesEnabled) return "notes";
@@ -360,7 +396,7 @@ export default function App() {
     if (status === "complete")
       return `${label.charAt(0).toUpperCase()}${label.slice(1)} updated`;
     if (message?.toLowerCase().startsWith("notes update stopped"))
-      return `${label.charAt(0).toUpperCase()}${label.slice(1)} update stopped. You can retry it.`;
+      return `${label.charAt(0).toUpperCase()}${label.slice(1)} update stopped. Your reply is saved.`;
     return message || `${label} could not be updated. Your reply is saved.`;
   }
 
@@ -1218,23 +1254,33 @@ export default function App() {
       }
     }
   }
-  async function updateNotes() {
-    const reply = [...messages]
-      .reverse()
-      .find(
-        (message) =>
-          message.role === "assistant" && message.status === "complete",
-      );
+  async function stop() {
+    if (stopRequested.current) return;
+    stopRequested.current = true;
+    setStopping(true);
+    const request = generation.current;
+    const turn = turnGeneration.current;
+    try {
+      await desktop.cancelTurn();
+    } catch (reason) {
+      if (request === generation.current && turn === turnGeneration.current) {
+        stopRequested.current = false;
+        setStopping(false);
+        setError(errorText(reason));
+      }
+    }
+  }
+
+  async function retrySavedUpdates() {
     if (
-      !reply ||
+      !failedNotesMessageId ||
+      failedNotesMessageId !== lastCompletedReplyId ||
       activeTurn.current ||
       busy ||
       sample ||
       (!sessionMemoryEnabled && !sessionNotesEnabled)
     )
       return;
-    const retryMemoryEnabled = sessionMemoryEnabled;
-    const retryNotesEnabled = sessionNotesEnabled;
     if (!connected || !model || (provider !== "ollama" && !remoteConsent)) {
       setSettings(true);
       return;
@@ -1243,13 +1289,18 @@ export default function App() {
     activeTurn.current = true;
     stopRequested.current = false;
     setSending(true);
+    setFailedNotesMessageId(null);
     setNoteStatus(
-      formatDerivationStatus("updating", retryMemoryEnabled, retryNotesEnabled),
+      formatDerivationStatus(
+        "updating",
+        sessionMemoryEnabled,
+        sessionNotesEnabled,
+      ),
     );
     setError("");
     try {
       await desktop.retryNotes({
-        messageId: reply.id,
+        messageId: failedNotesMessageId,
         baseUrl,
         model,
         provider,
@@ -1259,8 +1310,8 @@ export default function App() {
           if (event.type === "notes") {
             const status = formatDerivationStatus(
               event.status,
-              event.memoryEnabled ?? retryMemoryEnabled,
-              event.notesEnabled ?? retryNotesEnabled,
+              event.memoryEnabled ?? sessionMemoryEnabled,
+              event.notesEnabled ?? sessionNotesEnabled,
               event.message,
             );
             setNoteStatus(status);
@@ -1280,27 +1331,16 @@ export default function App() {
         setMemories(updatedMemories);
       }
     } catch (reason) {
-      if (request === generation.current) setNoteStatus(errorText(reason));
+      if (request === generation.current) {
+        setNoteStatus(
+          `Saved updates could not be retried. ${errorText(reason)}`,
+        );
+        setFailedNotesMessageId(failedNotesMessageId);
+      }
     } finally {
       if (request === generation.current) {
         activeTurn.current = false;
         setSending(false);
-      }
-    }
-  }
-  async function stop() {
-    if (stopRequested.current) return;
-    stopRequested.current = true;
-    setStopping(true);
-    const request = generation.current;
-    const turn = turnGeneration.current;
-    try {
-      await desktop.cancelTurn();
-    } catch (reason) {
-      if (request === generation.current && turn === turnGeneration.current) {
-        stopRequested.current = false;
-        setStopping(false);
-        setError(errorText(reason));
       }
     }
   }
@@ -1508,7 +1548,7 @@ export default function App() {
                       ? "Remembered context"
                       : notes
                         ? "Your notes"
-                        : "Conversation"}
+                        : (session?.title ?? "Conversation")}
                 </span>
                 <span className="header-slash" aria-hidden="true">
                   /
@@ -1693,12 +1733,20 @@ export default function App() {
                 }}
               />
             ) : (
-              <>
+              <div
+                className={`conversation-stage${messages.length ? "" : " is-empty"}`}
+              >
                 <Transcript
                   highlight={highlight}
                   messages={messages}
                   session={session}
                   sample={sample}
+                  hasRememberedContext={
+                    !sample &&
+                    !session?.private &&
+                    sessionMemoryEnabled &&
+                    memories.length > 0
+                  }
                   fontSize={fontSize}
                   scroll={scroll}
                   onScroll={() => {
@@ -1739,6 +1787,28 @@ export default function App() {
                         </button>
                       </div>
                     )}
+                    {(noteStatus ||
+                      failedNotesMessageId === lastCompletedReplyId) && (
+                      <div className="note-status">
+                        <span>
+                          {noteStatus ||
+                            "Saved updates could not be completed. Your reply is saved."}
+                        </span>
+                        {failedNotesMessageId === lastCompletedReplyId &&
+                          !sending &&
+                          !busy &&
+                          !sample &&
+                          (sessionMemoryEnabled || sessionNotesEnabled) && (
+                            <button
+                              className="text-button"
+                              type="button"
+                              onClick={retrySavedUpdates}
+                            >
+                              Retry saved updates
+                            </button>
+                          )}
+                      </div>
+                    )}
                     {sample ? (
                       <div className="sample-composer">
                         <span>
@@ -1761,7 +1831,6 @@ export default function App() {
                         sending={sending}
                         stopping={stopping}
                         hasReplyContent={hasReplyContent}
-                        noteStatus={noteStatus}
                         connectionReady={
                           connected && (provider === "ollama" || remoteConsent)
                         }
@@ -1774,6 +1843,7 @@ export default function App() {
                             onStart={() => void dictation.start()}
                             onFinish={dictation.finish}
                             onCancel={dictation.cancel}
+                            onRetry={() => void dictation.retry()}
                           />
                         }
                         voiceState={
@@ -1790,30 +1860,9 @@ export default function App() {
                               ? "light"
                               : "auto"
                         }
+                        empty={messages.length === 0}
                       />
                     )}
-                    <div className="notes-update-row">
-                      {noteStatus && (
-                        <p className="note-status">{noteStatus}</p>
-                      )}
-                      {!sample &&
-                        (sessionMemoryEnabled || sessionNotesEnabled) &&
-                        messages.some(
-                          (message) =>
-                            message.role === "assistant" &&
-                            message.status === "complete",
-                        ) && (
-                          <button
-                            className="text-button"
-                            onClick={updateNotes}
-                            disabled={sending || busy}
-                          >
-                            {sessionMemoryEnabled && !sessionNotesEnabled
-                              ? "Update remembered context"
-                              : "Update notes"}
-                          </button>
-                        )}
-                    </div>
                     <div className="composer-footnote">
                       <span>
                         {sample ? (
@@ -1840,7 +1889,7 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-              </>
+              </div>
             )}
           </main>
           {drawer && (

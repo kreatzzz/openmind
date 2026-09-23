@@ -214,6 +214,30 @@ beforeEach(() => {
 });
 
 describe("native conversation lifecycle", () => {
+  it("offers a focused opening and only mentions continuity when memory exists", async () => {
+    vi.mocked(desktop.listMemories).mockResolvedValue([memory]);
+    await openConnectedApp();
+    expect(
+      screen.getByRole("heading", {
+        name: "What feels important to talk through today?",
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/Remembered context from earlier conversations/),
+    ).toBeVisible();
+  });
+
+  it("does not promise remembered context when it is off for a conversation", async () => {
+    vi.mocked(desktop.listMemories).mockResolvedValue([memory]);
+    vi.mocked(desktop.listSessions).mockResolvedValue([
+      { ...session, memoryEnabled: false },
+    ]);
+    await openConnectedApp();
+    expect(
+      screen.queryByText(/Remembered context from earlier conversations/),
+    ).toBeNull();
+  });
+
   it("ignores late text and old turn completion after lock and a new unlocked turn", async () => {
     const oldTurn = deferred<void>();
     const newTurn = deferred<void>();
@@ -322,6 +346,13 @@ describe("native conversation lifecycle", () => {
       emit?.({ type: "notes", messageId: "reply", status: "updating" }),
     );
     expect(screen.getByRole("textbox", { name: "Your message" })).toBeEnabled();
+    expect(
+      document
+        .querySelector(".note-status")!
+        .compareDocumentPosition(
+          screen.getByRole("textbox", { name: "Your message" }),
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     await act(async () => {
       turn.resolve();
       await turn.promise;
@@ -841,7 +872,7 @@ describe("demo and notebook", () => {
     fireEvent.click(screen.getByRole("button", { name: "Your notes" }));
     expect(screen.getByText("No notes yet")).toBeInTheDocument();
   });
-  it("retries notes for a completed reply without resending it", async () => {
+  it("has no manual notes action for a completed reply", async () => {
     vi.mocked(desktop.listMessages).mockResolvedValue([
       {
         id: "reply-1",
@@ -852,24 +883,47 @@ describe("demo and notebook", () => {
         createdAt: session.createdAt,
       },
     ]);
-    const updating = deferred<void>();
-    vi.mocked(desktop.retryNotes).mockReturnValue(updating.promise);
     await openConnectedApp();
-    fireEvent.click(screen.getByRole("button", { name: "Update notes" }));
-    expect(desktop.retryNotes).toHaveBeenCalledWith(
-      expect.objectContaining({
+    expect(screen.queryByRole("button", { name: "Update notes" })).toBeNull();
+    expect(desktop.retryNotes).not.toHaveBeenCalled();
+  });
+  it("offers a recovery action only for failed saved updates", async () => {
+    vi.mocked(desktop.listMessages).mockResolvedValue([
+      {
+        id: "reply-1",
+        sessionId: session.id,
+        role: "assistant",
+        content: "A completed fictional reply.",
+        status: "complete",
+        createdAt: session.createdAt,
+      },
+    ]);
+    vi.mocked(desktop.listNoteJobs).mockResolvedValue([
+      {
         messageId: "reply-1",
+        status: "failed",
+        attemptCount: 3,
+        memoryEnabled: true,
+        notesEnabled: true,
+        provider: "ollama",
         model: "synthetic-model",
-      }),
-    );
-    expect(screen.getByRole("button", { name: "Update notes" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Stop reply" }));
-    expect(desktop.cancelTurn).toHaveBeenCalledOnce();
-    await act(async () => {
-      updating.resolve();
-      await updating.promise;
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+      },
+    ]);
+    vi.mocked(desktop.retryNotes).mockResolvedValue();
+    await openConnectedApp();
+    const retry = await screen.findByRole("button", {
+      name: "Retry saved updates",
     });
-    expect(desktop.sendMessage).not.toHaveBeenCalled();
+    expect(retry.closest(".note-status")).toBeInTheDocument();
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(desktop.retryNotes).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: "reply-1" }),
+      ),
+    );
+    expect(screen.queryByRole("button", { name: "Update notes" })).toBeNull();
   });
   it("saves a note using its revision and keeps its source evidence", async () => {
     const note = {

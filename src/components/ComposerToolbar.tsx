@@ -8,7 +8,6 @@ export function ComposerToolbar({
   enterToSend,
   hasReplyContent,
   leadingControls,
-  noteStatus,
   onStop,
   sending,
   stopping,
@@ -18,7 +17,6 @@ export function ComposerToolbar({
   enterToSend: boolean;
   hasReplyContent: boolean;
   leadingControls?: ReactNode;
-  noteStatus: string;
   onStop: () => void;
   sending: boolean;
   stopping: boolean;
@@ -34,7 +32,7 @@ export function ComposerToolbar({
       <div className="composer-toolbar-leading">
         {leadingControls}
         {sending ? (
-          <ModelActivity phase={phase} label={noteStatus || undefined} />
+          <ModelActivity phase={phase} />
         ) : (
           <span className="composer-hint">
             {enterToSend

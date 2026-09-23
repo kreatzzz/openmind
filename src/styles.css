@@ -371,6 +371,33 @@ p {
   min-height: 0;
   display: flex;
 }
+.conversation-stage {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.conversation-stage.is-empty {
+  overflow-y: auto;
+  padding: 24px 0 48px;
+}
+.conversation-stage.is-empty .transcript-scroller {
+  flex: 0 0 auto;
+  min-height: auto;
+  margin-top: auto;
+}
+.conversation-stage.is-empty .transcript-scroll {
+  overflow: visible;
+}
+.conversation-stage.is-empty .conversation-column {
+  max-width: 744px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.conversation-stage.is-empty .composer-region {
+  margin-bottom: auto;
+  padding-top: 26px;
+}
 .transcript-scroll {
   flex: 1;
   min-width: 0;
@@ -475,22 +502,23 @@ p {
   margin-top: 12px;
 }
 .empty-conversation {
-  padding: clamp(72px, 15vh, 144px) 0 48px;
+  padding: 0;
 }
 .empty-conversation h1 {
-  font-size: clamp(29px, 4vw, 36px);
+  font-size: clamp(24px, 2.8vw, 28px);
   font-weight: 600;
-  letter-spacing: -1px;
-  margin: 16px 0 14px;
+  line-height: 1.3;
+  letter-spacing: -0.7px;
+  margin: 13px 0 9px;
 }
 .empty-conversation p {
   color: var(--muted);
   font-size: 14px;
-  line-height: 1.8;
+  line-height: 1.65;
 }
-.empty-line,
-.empty-caption {
-  display: none;
+.empty-conversation .empty-memory-note {
+  font-size: 11px;
+  margin-top: 22px;
 }
 .composer-region {
   position: relative;
@@ -502,10 +530,11 @@ p {
   max-width: 680px;
 }
 .composer {
+  position: relative;
   background: var(--bg);
   border: 0;
   border-radius: 14px;
-  padding: 15px 8px 8px;
+  padding: 11px 8px 8px;
   box-shadow: var(--shadow-composer);
   transition-property: box-shadow;
   transition-duration: 120ms;
@@ -518,14 +547,14 @@ p {
 .composer:focus-within {
   box-shadow:
     inset 0 0 0 1px var(--field),
-    0 0 0 1px var(--field),
+    0 0 0 3px color-mix(in srgb, var(--focus) 16%, transparent),
     0 1px 2px #0000000a,
     0 10px 32px #00000010;
 }
 .composer textarea {
   display: block;
   width: 100%;
-  min-height: 52px;
+  min-height: 32px;
   max-height: 180px;
   padding: 0 10px;
   resize: none;
@@ -588,7 +617,8 @@ input::placeholder {
   align-items: center;
   gap: 4px;
 }
-.dictation-unavailable {
+.dictation-info-control {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -596,8 +626,36 @@ input::placeholder {
   font-size: 11px;
   white-space: nowrap;
 }
-.dictation-unavailable .composer-icon-button[aria-disabled="true"] {
-  opacity: 0.5;
+.dictation-error-label {
+  color: var(--error);
+}
+.dictation-detail {
+  position: absolute;
+  z-index: 3;
+  bottom: calc(100% + 10px);
+  left: 0;
+  width: min(290px, calc(100vw - 48px));
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: var(--shadow-floating);
+  white-space: normal;
+  line-height: 1.5;
+}
+.dictation-detail strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+.dictation-detail p {
+  color: var(--muted);
+  margin-top: 4px;
+}
+.dictation-detail button {
+  min-height: 40px;
+  margin-top: 8px;
+  color: var(--ink);
+  text-decoration: underline;
 }
 .dictation-active + .composer-hint {
   display: none;
@@ -1191,7 +1249,15 @@ input[type="checkbox"] {
 .note-status {
   color: var(--muted);
   font-size: 11px;
-  padding: 10px 2px 0;
+  padding: 0 2px 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.note-status .text-button {
+  min-height: 32px;
+  flex: none;
 }
 @media (max-width: 959px) {
   .desktop-rail {
@@ -1219,6 +1285,15 @@ input[type="checkbox"] {
   }
 }
 @media (max-width: 719px) {
+  .conversation-stage.is-empty {
+    padding: 28px 0 20px;
+  }
+  .conversation-stage.is-empty .conversation-column {
+    padding-inline: 16px;
+  }
+  .conversation-stage.is-empty .composer-region {
+    padding-top: 20px;
+  }
   .welcome-header {
     padding: 18px 20px;
   }
@@ -1286,15 +1361,6 @@ input[type="checkbox"] {
     transition-duration: 0s !important;
     scroll-behavior: auto !important;
   }
-}
-.notes-update-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.notes-update-row .note-status {
-  padding-top: 0;
 }
 .header-actions {
   display: flex;
