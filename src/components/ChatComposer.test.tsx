@@ -28,7 +28,6 @@ function renderComposer({
       sending={false}
       stopping={false}
       hasReplyContent={false}
-      noteStatus=""
       connectionReady
       voiceState={voiceState}
     />,

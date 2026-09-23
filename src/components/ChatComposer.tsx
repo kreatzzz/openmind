@@ -24,11 +24,11 @@ export interface ChatComposerProps {
   sending: boolean;
   stopping: boolean;
   hasReplyContent: boolean;
-  noteStatus: string;
   connectionReady: boolean;
   leadingControls?: ReactNode;
   voiceState?: "idle" | "listening" | "processing";
   voiceTheme?: "auto" | "dark" | "light";
+  empty?: boolean;
 }
 
 export function ChatComposer({
@@ -42,11 +42,11 @@ export function ChatComposer({
   sending,
   stopping,
   hasReplyContent,
-  noteStatus,
   connectionReady,
   leadingControls,
   voiceState = "idle",
   voiceTheme = "auto",
+  empty = false,
 }: ChatComposerProps) {
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -79,10 +79,12 @@ export function ChatComposer({
       <textarea
         ref={textareaRef}
         id="message"
-        rows={2}
+        rows={1}
         value={value}
         onChange={(event) => onValueChange(event.target.value)}
-        placeholder="What's on your mind?"
+        placeholder={
+          empty ? "Start with what comes to mind…" : "Message Openmind…"
+        }
         disabled={disabled}
         readOnly={voiceState !== "idle"}
         onKeyDown={handleKeyDown}
@@ -93,7 +95,6 @@ export function ChatComposer({
         enterToSend={enterToSend}
         hasReplyContent={hasReplyContent}
         leadingControls={leadingControls}
-        noteStatus={noteStatus}
         onStop={onStop}
         sending={sending}
         stopping={stopping}

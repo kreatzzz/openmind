@@ -93,6 +93,8 @@ The notebook is a full workspace view. Each note has a kind, its visible evidenc
 
 Conversation output has explicit You and Openmind AI labels. Generation and note updates have separate text status. The same Stop control cancels the active operation. A completed reply remains readable while notes update. Failures preserve existing content. Do not invent simulated typing or human-presence indicators.
 
+An empty conversation presents one gentle opening question directly above the composer. It is interface guidance, not a stored or generated AI turn. Keep the prompt and input together at desktop sizes, and let the conversation scroll normally after the first message. Note-update status appears above the composer; note generation runs after a completed reply without a manual chat action. Offer a retry there only when an update has failed.
+
 Settings separate Appearance, Model connection, Privacy & storage, and Memory & notes. Persist provider and reading preferences in the encrypted vault. Local Ollama is the default; ChatGPT via Codex and compatible API providers require explicit consent describing the destination and data sent. ChatGPT via Codex is available in native personal and example workspaces through the device's existing Codex sign-in. Provider changes require consent to be reviewed again. Appearance and accent choices alone go into browser localStorage. Conversations, drafts, and personal notes must never be stored there.
 
 ## Remembered context

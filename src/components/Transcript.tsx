@@ -52,6 +52,7 @@ export function Transcript({
   messages,
   session,
   sample,
+  hasRememberedContext,
   fontSize,
   scroll,
   onScroll,
@@ -60,6 +61,7 @@ export function Transcript({
   messages: Message[];
   session: Session | undefined;
   sample: boolean;
+  hasRememberedContext: boolean;
   fontSize: number;
   scroll: RefObject<HTMLDivElement | null>;
   onScroll: () => void;
@@ -125,19 +127,18 @@ export function Transcript({
               </>
             ) : (
               <div className="empty-conversation">
-                <div className="eyebrow">
-                  <span className="margin-line" aria-hidden="true" />
-                  NEW CONVERSATION
-                </div>
-                <h1>What's on your mind?</h1>
+                <span className="eyebrow">A PLACE TO BEGIN</span>
+                <h1>What feels important to talk through today?</h1>
                 <p>
-                  Start wherever you are.
-                  <br />A thought, a question, or something from your day.
+                  We can take it one part at a time. Share only what you want
+                  to.
                 </p>
-                <div className="empty-line" />
-                <span className="empty-caption">
-                  There is no right way to begin.
-                </span>
+                {hasRememberedContext && (
+                  <p className="empty-memory-note">
+                    Remembered context from earlier conversations is available
+                    here.
+                  </p>
+                )}
               </div>
             )}
           </div>

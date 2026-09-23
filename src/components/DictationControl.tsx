@@ -1,4 +1,12 @@
-import { Download, LoaderCircle, Mic, Square, X } from "lucide-react";
+import { useId, useRef, useState } from "react";
+import {
+  CircleAlert,
+  Download,
+  LoaderCircle,
+  Mic,
+  Square,
+  X,
+} from "lucide-react";
 import type { LocalDictationPhase } from "../hooks/useLocalDictation";
 
 export function DictationControl({
@@ -9,6 +17,7 @@ export function DictationControl({
   onStart,
   onFinish,
   onCancel,
+  onRetry,
 }: {
   phase: LocalDictationPhase;
   message: string;
@@ -17,7 +26,11 @@ export function DictationControl({
   onStart: () => void;
   onFinish: () => void;
   onCancel: () => void;
+  onRetry: () => void;
 }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = useId();
+  const detailsTrigger = useRef<HTMLButtonElement>(null);
   if (phase === "listening" || phase === "finishing") {
     return (
       <div className="dictation-active" role="status" aria-live="polite">
@@ -75,24 +88,72 @@ export function DictationControl({
     );
   }
 
-  const unavailable = phase === "unavailable" || phase === "checking";
-  if (unavailable) {
+  if (phase === "checking") {
     return (
-      <div className="dictation-unavailable">
+      <span className="dictation-info-control" role="status">
+        <LoaderCircle className="spin" size={16} aria-hidden="true" />
+        Checking dictation
+      </span>
+    );
+  }
+
+  if (phase === "unavailable" || phase === "starting" || phase === "error") {
+    const failed = phase === "error";
+    return (
+      <div className="dictation-info-control">
         <button
+          ref={detailsTrigger}
           className="composer-icon-button"
           type="button"
-          aria-disabled="true"
-          aria-describedby="dictation-unavailable-reason"
+          aria-label={
+            failed
+              ? "Dictation error details"
+              : phase === "starting"
+                ? "Starting local dictation"
+                : "Why is dictation unavailable?"
+          }
+          aria-expanded={detailsOpen}
+          aria-controls={detailsId}
           title={message}
+          onClick={() => setDetailsOpen((open) => !open)}
         >
-          <Mic size={17} />
+          {failed ? (
+            <CircleAlert size={17} />
+          ) : phase === "starting" ? (
+            <LoaderCircle className="spin" size={17} />
+          ) : (
+            <Mic size={17} />
+          )}
         </button>
-        <span id="dictation-unavailable-reason">
-          {phase === "checking"
-            ? "Checking dictation"
-            : "Dictation unavailable"}
-        </span>
+        {failed && (
+          <span className="dictation-error-label" role="alert">
+            Dictation stopped
+          </span>
+        )}
+        {detailsOpen && (
+          <div className="dictation-detail" id={detailsId} role="status">
+            <strong>
+              {failed
+                ? "Dictation stopped"
+                : phase === "starting"
+                  ? "Starting dictation"
+                  : "Local dictation"}
+            </strong>
+            <p>{message}</p>
+            {failed && (
+              <button
+                type="button"
+                onClick={() => {
+                  detailsTrigger.current?.focus();
+                  setDetailsOpen(false);
+                  onRetry();
+                }}
+              >
+                Try again
+              </button>
+            )}
+          </div>
+        )}
       </div>
     );
   }

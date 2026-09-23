@@ -179,10 +179,14 @@
   font-size: 13px;
 }
 .rail-action-selected,
-.rail-action-selected:hover,
-.session-item.selected {
+.rail-action-selected:hover {
   background: var(--accent-soft);
   color: var(--accent-text);
+}
+.session-item.selected {
+  background: var(--selected);
+  color: var(--ink);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .session-search {
   margin-top: 18px;
@@ -229,6 +233,12 @@
 .header-start {
   gap: 10px;
   min-width: 0;
+}
+.header-section {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: min(36vw, 320px);
 }
 .header-date {
   max-width: 240px;

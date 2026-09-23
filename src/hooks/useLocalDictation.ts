@@ -13,6 +13,7 @@ export type LocalDictationPhase =
   | "downloadable"
   | "downloading"
   | "ready"
+  | "starting"
   | "listening"
   | "finishing"
   | "error";
@@ -24,6 +25,7 @@ export interface LocalDictation {
   start: () => Promise<void>;
   finish: () => void;
   cancel: () => void;
+  retry: () => Promise<void>;
 }
 
 function phaseForAvailability(
@@ -72,6 +74,7 @@ export function useLocalDictation({
   const [message, setMessage] = useState("Checking local dictation support");
   const availabilityRef = useRef<LocalSpeechAvailability | null>(null);
   const sessionRef = useRef<LocalSpeechSession | null>(null);
+  const startInFlightRef = useRef(false);
   const sessionKeyRef = useRef(sessionKey);
   const requestRef = useRef(0);
   const valueRef = useRef(value);
@@ -172,17 +175,20 @@ export function useLocalDictation({
   const start = useCallback(async () => {
     if (
       disabled ||
+      startInFlightRef.current ||
       sessionRef.current ||
       availabilityRef.current?.status !== "ready"
     )
       return;
 
     const request = ++requestRef.current;
+    startInFlightRef.current = true;
     originalRef.current = valueRef.current;
     selectionRef.current = selection();
     finalTextRef.current = "";
     interimTextRef.current = "";
     setMessage("Starting local dictation");
+    setPhase("starting");
 
     try {
       let ended = false;
@@ -242,12 +248,15 @@ export function useLocalDictation({
       if (ended) return;
       sessionRef.current = speech;
     } catch (reason) {
+      if (request !== requestRef.current) return;
       setPhase("error");
       setMessage(
         reason instanceof Error
           ? reason.message
           : "Local dictation could not start",
       );
+    } finally {
+      startInFlightRef.current = false;
     }
   }, [disabled, language, selection]);
 
@@ -259,6 +268,15 @@ export function useLocalDictation({
   }, []);
 
   const cancel = useCallback(() => cancelSession(true), [cancelSession]);
+  const retry = useCallback(async () => {
+    if (availabilityRef.current?.status === "downloadable") {
+      await install();
+    } else if (availabilityRef.current?.status === "ready") {
+      await start();
+    } else {
+      await refresh();
+    }
+  }, [install, refresh, start]);
 
   return {
     phase,
@@ -267,5 +285,6 @@ export function useLocalDictation({
     start,
     finish,
     cancel,
+    retry,
   };
 }

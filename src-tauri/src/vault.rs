@@ -1255,6 +1255,34 @@ impl Vault {
         })
     }
 
+    /// A deliberate user retry may reopen an exhausted failed job. Automatic
+    /// retries still stop after three attempts per cycle.
+    pub fn reopen_failed_notes(&mut self, assistant_id: &str) -> Result<()> {
+        let assistant_id = canonical_id(assistant_id, "assistant message ID")?;
+        let changed = self.connection.execute(
+            "UPDATE notes_jobs SET attempt_count=0, next_attempt_at=NULL, updated_at=?1
+             WHERE assistant_message_id=?2 AND status='failed' AND attempt_count>=3",
+            params![now_rfc3339(), assistant_id],
+        )?;
+        if changed == 0 {
+            let status: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT status FROM notes_jobs WHERE assistant_message_id=?1",
+                    [&assistant_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            return match status.as_deref() {
+                Some("failed") => Ok(()),
+                Some("running") => Err(VaultError::NotesJobAlreadyRunning),
+                Some("complete") => Err(VaultError::NotesAlreadyComplete),
+                _ => Err(VaultError::NotesJobNotFound),
+            };
+        }
+        Ok(())
+    }
+
     /// Mark a claimed job complete when both output branches were disabled at
     /// submission or durably revoked before a retry. No provider output is
     /// accepted or written for this path.
@@ -4845,6 +4873,36 @@ mod tests {
         assert!(context.contains("[user-reported] goal: Reconnect with friends"));
         assert!(context.contains("miss my friends"));
         assert!(context.len() <= 1_000);
+    }
+
+    #[test]
+    fn explicit_retry_reopens_exhausted_failed_notes_only() {
+        let directory = temp_vault_dir();
+        let mut vault = Vault::create(directory.path(), "synthetic passphrase").expect("create");
+        let session = vault.create_session().expect("session");
+        let (_, assistant) = finish_synthetic_turn(
+            &mut vault,
+            &session.id,
+            "I want to reconnect with a friend.",
+        );
+        for _ in 0..3 {
+            vault.begin_notes(&assistant.id).expect("claim");
+            vault.fail_notes(&assistant.id).expect("fail");
+        }
+        assert!(matches!(
+            vault.begin_notes(&assistant.id),
+            Err(VaultError::NotesRetryExhausted)
+        ));
+        vault
+            .reopen_failed_notes(&assistant.id)
+            .expect("explicit retry");
+        vault
+            .begin_notes(&assistant.id)
+            .expect("claim reopened job");
+        assert!(matches!(
+            vault.reopen_failed_notes(&assistant.id),
+            Err(VaultError::NotesJobAlreadyRunning)
+        ));
     }
 
     #[test]
